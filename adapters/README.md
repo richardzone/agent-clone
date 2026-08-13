@@ -1,7 +1,9 @@
 # Adapter interface contract
 
-`clone-app.sh` is a generic engine. It only knows the main line: copy the bundle →
-rewrite identity → patch the asar → install a wrapper → sign inside-out.
+`clone-agent.sh` is a generic engine. It manages a unified profile and dispatches
+its `app`, `cli`, or `all` target. For apps, the main line is copy the bundle →
+rewrite identity → patch the asar → install a wrapper → sign inside-out. For CLIs,
+it generates a profile launcher that selects the isolated agent home.
 **Everything app-specific lives in an adapter.**
 
 Supporting a new app means writing `<kind>.sh` in this directory and referring to
@@ -42,6 +44,8 @@ Consequently:
 | `A_SOURCE_DEFAULT` | Default path to the source app; overridable with `--source` |
 | `A_EXEC_NAME` | Original executable name under `Contents/MacOS/`. The engine renames it to the clone name and writes the wrapper in its place — that way `CFBundleExecutable` never changes while the process name shows the clone |
 | `A_BUNDLE_ID_BASE` | Bundle ID prefix. The engine forms `<base>.<lowercased clone name>`; overridable with `--bundle-id` |
+| `A_CLI_COMMAND` | Vendor CLI command found through `PATH` and invoked by the generated profile launcher |
+| `A_CLI_HOME_TEMPLATE` | Literal portable path containing `<NAME>`, such as `$HOME/.claude-<NAME>` |
 
 Get `A_EXEC_NAME` wrong and the engine fails at step 8 with "Main executable not
 found".
@@ -60,7 +64,7 @@ documentation:
 
 ## Functions
 
-**All six must be defined** — the engine calls them unconditionally. Write a no-op
+**All nine must be defined** — the engine calls the target-relevant set. Write a no-op
 for the ones you don't need:
 
 ```zsh
@@ -77,6 +81,9 @@ Call order (numbers refer to the engine's steps):
 | 8/9 install wrapper | `a_wrapper_env` | clone name |
 | 9/9 re-sign (**before** the engine's generic loops) | `a_sign_extra` | clone app path |
 | After everything succeeds | `a_notes` | clone name |
+| CLI launcher generation | `a_cli_wrapper_env` | clone name |
+| CLI launcher generation | `a_cli_exec` | none |
+| After CLI succeeds | `a_cli_notes` | clone name |
 
 ### `a_preflight <src>`
 
@@ -136,8 +143,10 @@ Sign adapter-specific deep content. The engine then signs
 the real main binary → the outer bundle.
 
 So handle only what those loops don't reach: helpers, `Libraries/` and `PlugIns/`
-*inside* a framework, plus any standalone binaries the bundle ships (Codex's
-`Contents/Resources/codex`).
+*inside* a framework, plus any standalone binaries the bundle ships. An adapter
+may deliberately preserve an upstream signature instead: Codex must keep the
+Developer ID signature on `Contents/Resources/codex` for Browser Use peer
+authentication.
 
 Work **inside-out** here as well: deepest first, so the outer seals cover what is
 already signed. **Never sign with `codesign --deep`** — Apple deprecated it for
@@ -148,6 +157,15 @@ only.
 
 Printed to the user once everything succeeds. A good place for app-specific
 caveats. No-op if there are none.
+
+### CLI functions
+
+`a_cli_wrapper_env <name>` prints portable `export`/`unset` statements into the
+generated launcher. `a_cli_exec` prints its final `exec` command and must forward
+`"$@"`. `a_cli_notes <name>` explains first-login or authentication behavior.
+Launchers must never embed tokens. Codex forces file-based account and MCP OAuth
+stores inside its profile-specific `CODEX_HOME`; Claude clears higher-precedence
+ambient API/provider credentials so subscription login cannot be silently bypassed.
 
 ---
 

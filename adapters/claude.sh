@@ -1,13 +1,15 @@
 #!/bin/zsh
 # Adapter: Claude desktop (Anthropic)
 #
-# Loaded by clone-app.sh. Interface contract: adapters/README.md.
+# Loaded by clone-agent.sh. Interface contract: adapters/README.md.
 
 A_LABEL="Claude"
 A_SOURCE_DEFAULT="/Applications/Claude.app"
 A_EXEC_NAME="Claude"                                  # original executable under Contents/MacOS/
 A_BUNDLE_ID_BASE="com.anthropic.claudefordesktop"
 A_FRAMEWORK=""                                        # main framework name; empty = nothing special
+A_CLI_COMMAND="claude"
+A_CLI_HOME_TEMPLATE='$HOME/.claude-<NAME>'
 
 # Claude's keychain service name derives from productName in the asar's
 # package.json, so changing productName yields a separate "<Name> Safe Storage"
@@ -54,6 +56,18 @@ a_extra_plist() { :; }
 # Claude only needs the Electron-level isolation, so the wrapper gets no extra env.
 a_wrapper_env() { :; }
 
+# CLI launchers default to subscription login. Clear higher-precedence credential
+# sources so a shell-level API key or cloud-provider switch cannot silently make
+# this profile use a different account or billing path.
+a_cli_wrapper_env() {
+  local name="$1"
+  print "export CLAUDE_CONFIG_DIR=\"${A_CLI_HOME_TEMPLATE//<NAME>/$name}\""
+  print 'unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN'
+  print 'unset CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY CLAUDE_CODE_USE_MANTLE'
+}
+
+a_cli_exec() { print 'exec claude "$@"'; }
+
 a_sign_extra() {
   local app="$1" h f
   # Contents of Helpers/ vary by release (1.28929 added app-cu-helper), so don't
@@ -67,3 +81,8 @@ a_sign_extra() {
 }
 
 a_notes() { :; }
+
+a_cli_notes() {
+  print "  Claude CLI uses subscription login; ambient API keys and cloud-provider"
+  print "  selectors are cleared by the generated launcher. Run /login on first use."
+}

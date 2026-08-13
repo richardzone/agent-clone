@@ -1,0 +1,6 @@
+#!/bin/zsh
+# Keep an OpenAI-signed executable between the cloned Electron process and the
+# bundled codex binary. Browser Use authenticates the node_repl process and two
+# ancestors, so an ad-hoc-signed clone cannot launch codex directly.
+resources_dir="${0:A:h}"
+exec "$resources_dir/cua_node/bin/node" "$resources_dir/codex-cli-launcher.cjs" "$@"

@@ -1,16 +1,16 @@
 # agent-clone
 
-Run **multiple isolated copies of AI agent desktop apps** on macOS, each signed
-into a different account.
+Run **multiple isolated copies of AI agent desktop apps and CLIs** on macOS, each
+signed into a different account.
 
-Supports **Claude** (Anthropic) and **Codex** (OpenAI). Every clone gets its own
-login, sessions, history, config, icon and Dock entry. The original app is never
-modified.
+Supports **Claude** (Anthropic) and **Codex** (OpenAI). A single profile can
+manage the desktop app, CLI, or both. Every instance gets isolated login,
+sessions, history and config; desktop targets also get their own icon and Dock
+entry. The original app is never modified.
 
-**macOS only**, and desktop apps only. The whole approach is built on macOS
-specifics — `.app` bundles, `codesign`, `PlistBuddy`, Launch Services — with no
-equivalent on other platforms. Isolating the CLIs instead takes a single
-environment variable, see [Isolating the CLIs](#isolating-the-clis).
+Desktop cloning is **macOS only** because it relies on `.app` bundles, `codesign`,
+`PlistBuddy` and Launch Services. CLI targets use vendor-supported configuration
+directories, but this unified script currently runs under macOS/zsh as well.
 
 ---
 
@@ -20,14 +20,14 @@ The interactive path detects which apps you have installed and prompts for the
 rest:
 
 ```bash
-./clone-app.sh --init
+./clone-agent.sh --init
 ```
 
 Or do it directly, substituting your own clone names and icons:
 
 ```bash
-./clone-app.sh MyClaude --app claude --icon ~/Pictures/my-claude.png
-./clone-app.sh MyCodex  --app codex  --icon ~/Pictures/my-codex.png
+./clone-agent.sh MyClaude --app claude --icon ~/Pictures/my-claude.png
+./clone-agent.sh MyCodex  --app codex  --icon ~/Pictures/my-codex.png
 
 open /Applications/MyClaude.app
 ```
@@ -36,7 +36,7 @@ open /Applications/MyClaude.app
 rebuild every clone:
 
 ```bash
-./clone-app.sh --all
+./clone-agent.sh --all
 ```
 
 That last command is the only one worth memorising. The arguments from the first
@@ -55,22 +55,26 @@ sample icons in `icons/` are there if you just want to try the flow first.
 
 | Command | Purpose |
 |---|---|
-| `./clone-app.sh --init` | Interactive setup — start here |
-| `./clone-app.sh <Name> --app <kind> --icon <path>` | Create a clone, or change its icon |
-| `./clone-app.sh <Name>` | Rebuild from the stored profile |
-| `./clone-app.sh --all` | Rebuild every clone (**use this after upgrades**) |
-| `./clone-app.sh --list` | List configured clones and their types |
-| `./clone-app.sh ... --dry-run` | Preview only — append to any invocation above |
-| `./clone-app.sh --help` | Full argument reference |
+| `./clone-agent.sh --init` | Interactive setup; asks for `all`, `app`, or `cli` (default `all`) |
+| `./clone-agent.sh <Name> --app <kind> --icon <path>` | Create app + CLI (new-profile default) |
+| `./clone-agent.sh <Name> --app <kind> --target cli` | Create only an isolated CLI launcher |
+| `./clone-agent.sh <Name>` | Rebuild from the stored unified profile |
+| `./clone-agent.sh --all` | Rebuild every configured profile (**use after app upgrades**) |
+| `./clone-agent.sh --list` | List configured profiles, agent types and targets |
+| `./clone-agent.sh ... --dry-run` | Preview only — append to any invocation above |
+| `./clone-agent.sh --help` | Full argument reference |
 
-Other options: `--bundle-id`, `--data-dir`, `--source`, `--dest-dir`.
-`--app` is case-insensitive.
+Other options: `--target`, `--cli-name`, `--cli-bin-dir`, `--bundle-id`,
+`--data-dir`, `--source`, `--dest-dir`. `--app` and `--target` are
+case-insensitive. Existing profiles created before CLI support remain app-only
+until explicitly changed with `--target all` or `--target cli`.
 
-A clone's name is simultaneously its `.app` filename, display name, process name
-and data directory — pick something you can tell apart at a glance, and don't reuse
-the name of an app you already have. Every run deletes and rebuilds `<Name>.app` in
-the destination directory; the script refuses to delete a bundle it didn't create,
-so a collision is reported rather than acted on, but it still costs you a retry.
+For app targets, a profile name is simultaneously the `.app` filename, display
+name, process name and data directory. For CLI targets it also contributes to the
+default command name. Pick something you can tell apart at a glance, and don't
+reuse an installed app name. Every app-target run deletes and rebuilds
+`<Name>.app` in the destination directory; the script refuses to delete a bundle
+it didn't create, so a collision is reported rather than acted on.
 
 ### Where a clone's data lives
 
@@ -79,8 +83,9 @@ Outside the app bundle — which is why rebuilding never loses logins or history
 - `~/Library/Application Support/<Name>` — Electron data, for every clone
 - `~/.codex-<Name>` — Codex only: login (`auth.json`), sessions, `config.toml`, MCP config
 
-Removing a clone for good means deleting its `.app`, its `profiles/<Name>.conf`, and
-those directories.
+CLI launchers are installed as `~/.local/bin/<kind>-<lowercase-name>`. Removing a
+profile for good means deleting its `.app` (if any), launcher (if any),
+`profiles/<Name>.conf`, and the data directories.
 
 Note that each clone gets its own bundle ID, and macOS grants permissions
 (notifications, microphone, screen recording, …) per bundle ID — so a clone asks for
@@ -122,7 +127,7 @@ match, it usually just crashes. The Codex adapter disables Sparkle's automatic
 checks explicitly; for Claude, **ignore any update prompt you see**.
 
 The correct sequence is: let the original app update normally, then run
-`./clone-app.sh --all`. The script is idempotent and safe to re-run at any time.
+`./clone-agent.sh --all`. The script is idempotent and safe to re-run at any time.
 User data lives outside the bundle, so rebuilding preserves logins and history.
 
 ---
@@ -141,6 +146,7 @@ The substantive differences are isolated in `adapters/`:
 | Helpers need renaming | **Yes** — otherwise `Unable to find helper app` | No, paths anchor to the framework name |
 | Data isolation | `--user-data-dir` only | `--user-data-dir` **plus** `CODEX_HOME` |
 | Keychain isolation | ✅ possible (via asar `productName`) | ❌ not possible (names compiled into native code) |
+| Browser Use | Unchanged | ✅ via an OpenAI-signed `node_repl → codex → node` launch chain |
 | Auto-update | in-house Squirrel, no plist switch | Sparkle, disabled via `SUEnableAutomaticChecks` |
 
 ### Codex keychain limitation
@@ -172,7 +178,7 @@ use.
 ## Repository layout
 
 ```
-clone-app.sh                        the generic engine
+clone-agent.sh                      unified APP/CLI engine
 AGENTS.md                           maintainer notes — read before changing anything
 adapters/README.md                  adapter interface contract
 adapters/claude.sh                  Claude support
@@ -199,17 +205,21 @@ clone and try to rebuild it.
 The icon tool searches `python3`, Homebrew and pyenv locations for an interpreter
 that actually has Pillow, rather than trusting whichever one is first on `PATH`.
 
-## Isolating the CLIs
+## CLI isolation
 
-CLIs need no cloning — changing the config directory changes the account:
+The generated launcher is intentionally tiny: it contains no credentials and
+forwards every argument to the installed vendor CLI.
 
-```bash
-alias claude-work='CLAUDE_CONFIG_DIR=~/.claude-work claude'
-alias codex-work='CODEX_HOME=~/.codex-work codex'
-```
+- Claude sets `CLAUDE_CONFIG_DIR` and clears ambient API-key/cloud-provider
+  variables so `/login` uses the intended subscription account.
+- Codex sets `CODEX_HOME` and forces both account and MCP OAuth credential stores
+  to `file`, keeping them inside that profile's directory.
 
-Log in on first run. Note that if `ANTHROPIC_API_KEY` is set, the Claude CLI
-bills per token and ignores your subscription.
+Make sure `~/.local/bin` is on `PATH`, then run the command printed at the end of
+setup and log in on first use. Override the command or install directory with
+`--cli-name` and `--cli-bin-dir`. The isolation knobs are documented by the
+[official OpenAI configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
+and [Claude Code environment-variable reference](https://code.claude.com/docs/en/env-vars).
 
 ---
 

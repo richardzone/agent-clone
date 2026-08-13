@@ -7,7 +7,7 @@ Notes for whoever maintains this repository next — human or AI.
 > of Claude or Codex, you want [README.md](README.md) instead.
 
 Every item below corresponds to a real failure. Read them before changing
-anything under `clone-app.sh`, `adapters/`, or `tools/`.
+anything under `clone-agent.sh`, `adapters/`, or `tools/`.
 
 ---
 
@@ -80,9 +80,10 @@ version** (e.g. `151.0.7922.76`, not Claude's `A`). Resolve it through the
 
 `codesign --deep` is deprecated by Apple **for signing** and produces mismatched
 signatures on nested helpers. The correct order is: adapter-specific deep content
-(helpers inside the framework, `Libraries`, `PlugIns`, Codex's `Resources/codex`)
-→ the frameworks themselves → native modules outside the asar → the real main
-binary → **the outer bundle last**, so its seal covers everything already signed.
+(helpers inside the framework, `Libraries`, `PlugIns`) → the frameworks themselves
+→ native modules outside the asar → the real main binary → **the outer bundle
+last**, so its seal covers everything already signed. Codex's `Resources/codex`
+is the deliberate exception: keep its original Developer ID signature (section 10).
 
 `--deep` is fine — and recommended — for **verification**
 (`codesign --verify --deep --strict`).
@@ -141,6 +142,36 @@ centers it. Two traps:
   more room along the short axis. That is dictated by the aspect ratio; it can
   only be reduced by scaling the content up overall, not eliminated. Default
   content ratio is 0.88; override with `ICON_CONTENT_RATIO`.
+
+## 10. Browser Use needs three consecutive OpenAI-signed processes
+
+**Symptom:** Browser Use hangs or reports no available browser in a Codex clone,
+even though the app has created sockets under `/tmp/codex-browser-use/`.
+
+`browser-use-peer-authorization.node` validates the connecting `node_repl`
+process, its parent and its grandparent. All three must have an allowed OpenAI
+Team ID and signing identifier. A direct clone launch produces
+`node_repl → codex → <clone main>`; re-signing the latter two ad-hoc makes the
+socket reject the client immediately.
+
+The Codex adapter sets `CODEX_CLI_PATH` to a tiny shell launcher which immediately
+`exec`s the original signed Node binary. That Node process runs a JS launcher and
+spawns the untouched signed `Resources/codex`, producing the accepted chain
+`node_repl → codex → node`. Do not ad-hoc sign `Resources/codex`, the bundled Node,
+or `node_repl`, and do not replace this with a bypass in the authorization module.
+
+## 11. CLI launchers belong to the unified profile
+
+Do not add a second management script or a second profiles directory. The engine
+owns both targets through `P_TARGET=all|app|cli` in `profiles/<Name>.conf`; the
+small files under `~/.local/bin` are generated launchers, not another source of
+configuration.
+
+Launchers must contain no credentials. Codex selects a per-profile `CODEX_HOME`
+and forces file storage for account and MCP OAuth credentials. Claude selects a
+per-profile `CLAUDE_CONFIG_DIR` and clears higher-precedence ambient API/provider
+credentials so subscription login is deterministic. Keep literal `$HOME` values
+single-quoted in the profile, as described in section 8.
 
 ---
 

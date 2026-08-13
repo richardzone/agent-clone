@@ -4,13 +4,14 @@
 # Note the mismatched names: what gets installed is /Applications/ChatGPT.app,
 # but the bundle id is com.openai.codex and the asar's productName is Codex.
 #
-# Loaded by clone-app.sh. Interface contract: adapters/README.md.
+# Loaded by clone-agent.sh. Interface contract: adapters/README.md.
 
 A_LABEL="Codex"
 A_SOURCE_DEFAULT="/Applications/ChatGPT.app"
 A_EXEC_NAME="ChatGPT"                        # original executable under Contents/MacOS/
 A_BUNDLE_ID_BASE="com.openai.codex"
 A_FRAMEWORK="Codex Framework"
+A_CLI_COMMAND="codex"
 
 # ⚠️ Codex's keychain service names (Codex Safe Storage / Codex Storage Key /
 # Codex MCP Credentials) are not driven by the asar's productName — the first two
@@ -25,6 +26,7 @@ A_KEYCHAIN_ISOLATED=0
 # Chromium layer.
 # Confirmed present in the asar: resolveCodexHome() reads process.env.CODEX_HOME ?? ~/.codex
 A_CODEX_HOME_TEMPLATE='$HOME/.codex-<NAME>'
+A_CLI_HOME_TEMPLATE="$A_CODEX_HOME_TEMPLATE"
 
 # The framework's version directory is named after the Chromium version (e.g.
 # 151.0.7922.76), not Claude's "A", so it can only be resolved through the
@@ -53,6 +55,26 @@ a_preflight() {
     print "CODEX_HOME not found in app.asar — data isolation may no longer work"; return 1
   fi
   print "   CODEX_HOME support ✓"
+  # Browser Use authenticates node_repl plus its parent and grandparent. The clone's
+  # Electron executable is necessarily ad-hoc signed, so the adapter routes app-server
+  # startup through the bundled OpenAI-signed Node executable. This override is the
+  # supported entry point for doing that without modifying the asar again.
+  if ! strings -a "$src/Contents/Resources/app.asar" 2>/dev/null | grep -q 'CODEX_CLI_PATH'; then
+    print "CODEX_CLI_PATH not found in app.asar — Browser Use isolation may no longer work"; return 1
+  fi
+  local codex_bin="$src/Contents/Resources/codex"
+  local node_bin="$src/Contents/Resources/cua_node/bin/node"
+  [[ -x "$codex_bin" ]] || { print "Missing bundled codex executable"; return 1 }
+  [[ -x "$node_bin" ]] || { print "Missing bundled Node executable"; return 1 }
+  codesign --verify --strict \
+    -R='identifier "codex" and anchor apple generic and certificate leaf[subject.OU] = "2DC432GLL2"' \
+    "$codex_bin" 2>/dev/null ||
+    { print "Bundled codex executable no longer has the expected OpenAI signature"; return 1 }
+  codesign --verify --strict \
+    -R='identifier "node" and anchor apple generic and certificate leaf[subject.OU] = "2DC432GLL2"' \
+    "$node_bin" 2>/dev/null ||
+    { print "Bundled Node executable no longer has the expected OpenAI signature"; return 1 }
+  print "   Browser Use signed launch chain ✓"
 }
 
 # Codex's helper paths anchor to the framework name, so CFBundleName does not
@@ -76,12 +98,29 @@ a_wrapper_env() {
   local name="$1"
   # Second isolation layer: login state, sessions and MCP config all live under CODEX_HOME
   print "export CODEX_HOME=\"${A_CODEX_HOME_TEMPLATE//<NAME>/$name}\""
+  # Route app-server startup through a signed Node parent. The launcher ultimately
+  # runs the untouched bundled codex binary with the exact arguments it received.
+  print 'export CODEX_CLI_PATH="$APP_DIR/../Resources/codex-cli-launcher"'
+}
+
+a_cli_wrapper_env() {
+  local name="$1"
+  print "export CODEX_HOME=\"${A_CLI_HOME_TEMPLATE//<NAME>/$name}\""
+}
+
+# Keep both account auth and MCP OAuth credentials in the profile-specific
+# CODEX_HOME instead of allowing a shared macOS Keychain entry.
+a_cli_exec() {
+  print 'exec codex -c '\''cli_auth_credentials_store="file"'\'' -c '\''mcp_oauth_credentials_store="file"'\'' "$@"'
 }
 
 a_sign_extra() {
   local app="$1"
   local fwdir="$(_a_fwdir "$app")"
   local h f
+  cp "$REPO_DIR/tools/codex-cli-launcher" "$app/Contents/Resources/codex-cli-launcher"
+  cp "$REPO_DIR/tools/codex-cli-launcher.cjs" "$app/Contents/Resources/codex-cli-launcher.cjs"
+  chmod +x "$app/Contents/Resources/codex-cli-launcher"
   # Inside the framework: helper apps -> loose executables -> Libraries
   for h in "$fwdir/Helpers/"*.app; do
     [[ -d "$h" ]] && codesign --force --sign - "$h" >/dev/null 2>&1
@@ -97,9 +136,10 @@ a_sign_extra() {
   for f in "$app/Contents/PlugIns/"*; do
     [[ -e "$f" ]] && codesign --force --sign - "$f" >/dev/null 2>&1
   done
-  # Codex-specific: the bundle also ships the codex CLI binary and a few native helpers
-  [[ -f "$app/Contents/Resources/codex" ]] &&
-    codesign --force --sign - "$app/Contents/Resources/codex" >/dev/null 2>&1
+  # Preserve the original Developer ID signature on Resources/codex. Browser Use
+  # rejects the local pipe unless node_repl and both ancestors retain trusted
+  # OpenAI identities; replacing this signature with ad-hoc breaks that chain.
+  codesign --verify --strict "$app/Contents/Resources/codex" >/dev/null 2>&1
   for f in "$app/Contents/Resources/native/"*; do
     [[ -f "$f" ]] && codesign --force --sign - "$f" >/dev/null 2>&1
   done
@@ -114,4 +154,10 @@ a_notes() {
   print "  Login state lives in \$CODEX_HOME/auth.json (a file, not the keychain), so logins"
   print "  are fully isolated — measured with no keychain prompts. The one exception:"
   print "  OAuth tokens for identically-named MCP servers overwrite each other."
+}
+
+
+a_cli_notes() {
+  print "  Codex CLI auth and MCP OAuth credentials are forced to file storage under"
+  print "  the profile-specific \$CODEX_HOME. Run 'codex login' through this launcher."
 }
