@@ -7,31 +7,10 @@ Supports **Claude** (Anthropic) and **Codex** (OpenAI). Every clone gets its own
 login, sessions, history, config, icon and Dock entry. The original app is never
 modified.
 
-Desktop apps only — isolating the CLIs takes one environment variable, see the
-end of this file.
-
----
-
-## Before you start
-
-This repo **ships no vendor binaries**. It operates in place on the app you
-already have installed: copy the bundle, change its identity, re-sign it. Your
-original app is left untouched throughout.
-
-That said, a few consequences are worth knowing up front:
-
-- **Clones lose Apple's signature and notarization.** Modifying a bundle
-  invalidates its signature, so the script re-signs ad-hoc (`codesign --sign -`).
-  A clone is therefore no longer covered by full Gatekeeper validation.
-- **Clones receive no security updates.** Built-in auto-update has to be disabled
-  (it would overwrite the clone with the official package, wiping every change and
-  usually breaking it outright), so you rebuild by hand after each upstream
-  release — see below.
-- **Whether multi-account use fits each service's terms is yours to check.** This
-  repo solves the technical isolation problem only; it grants no permission to use
-  any service.
-
-Not affiliated with Anthropic or OpenAI. Use at your own risk.
+**macOS only**, and desktop apps only. The whole approach is built on macOS
+specifics — `.app` bundles, `codesign`, `PlistBuddy`, Launch Services — with no
+equivalent on other platforms. Isolating the CLIs instead takes a single
+environment variable, see [Isolating the CLIs](#isolating-the-clis).
 
 ---
 
@@ -106,6 +85,29 @@ those directories.
 Note that each clone gets its own bundle ID, and macOS grants permissions
 (notifications, microphone, screen recording, …) per bundle ID — so a clone asks for
 them again on first use, independently of the original.
+
+---
+
+## Notes
+
+This repo **ships no vendor binaries**. It operates in place on the app you
+already have installed: copy the bundle, change its identity, re-sign it. Your
+original app is left untouched throughout.
+
+That said, a few consequences are worth knowing:
+
+- **Clones lose Apple's signature and notarization.** Modifying a bundle
+  invalidates its signature, so the script re-signs ad-hoc (`codesign --sign -`).
+  A clone is therefore no longer covered by full Gatekeeper validation.
+- **Clones receive no security updates.** Built-in auto-update has to be disabled
+  (it would overwrite the clone with the official package, wiping every change and
+  usually breaking it outright), so you rebuild by hand after each upstream
+  release — see below.
+- **Whether multi-account use fits each service's terms is yours to check.** This
+  repo solves the technical isolation problem only; it grants no permission to use
+  any service.
+
+Not affiliated with Anthropic or OpenAI. Use at your own risk.
 
 ---
 
