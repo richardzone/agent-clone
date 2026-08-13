@@ -1,0 +1,39 @@
+# Profile format reference — the clone parameters for one app.
+#
+# This file is never read by the engine: --list and --all only scan
+# profiles/*.conf, and this one ends in .conf.sample, so it is not mistaken for a
+# real clone.
+#
+# Real profiles are written automatically by clone-app.sh on first creation, and
+# the filename is the clone name:
+#
+#   ./clone-app.sh MyClaude --app claude --icon ~/Pictures/my-claude.png
+#       -> writes profiles/MyClaude.conf
+#
+# After that, ./clone-app.sh MyClaude (or --all for everything) rebuilds from it
+# with no further arguments. Hand-editing is rarely needed: to change the icon,
+# just re-run the command with a new --icon.
+
+# Which app to clone; maps to adapters/<kind>.sh. Currently claude | codex
+P_APP='claude'
+
+# Icon path (.icns). Relative paths resolve against the repo root, which keeps
+# profiles portable across machines.
+P_ICON='icons/example-claude.icns'
+
+# The clone's bundle ID. Must differ from the original, or macOS treats both as the
+# same application. Default is derived from the clone name:
+# <adapter's A_BUNDLE_ID_BASE>.<lowercased clone name>
+P_BUNDLE_ID='com.anthropic.claudefordesktop.myclaude'
+
+# Electron data directory.
+# $HOME must stay literal (single quotes) — the wrapper expands it at runtime.
+# Storing an absolute path here would pin the profile to one user and break on
+# another machine.
+P_DATA_DIR='$HOME/Library/Application Support/MyClaude'
+
+# Path to the source app. Note that Codex desktop installs as /Applications/ChatGPT.app
+P_SOURCE='/Applications/Claude.app'
+
+# Where to install the clone
+P_DEST_DIR='/Applications'
