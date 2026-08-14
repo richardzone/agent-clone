@@ -159,15 +159,23 @@ defaults read com.openai.codex.<clone> SUEnableAutomaticChecks   # 1, despite th
 defaults read com.openai.codex.<clone> SULastCheckTime           # and still ticking
 ```
 
-`defaults write` is not the fix either — Codex's own
-`Contents/Resources/native/sparkle.node` calls `setAutomaticallyChecksForUpdates:`
-on launch and puts it back. The working switch is Codex's own environment gate,
-injected by `a_wrapper_env`:
+`defaults write` is not the fix either — it gets put back. `sparkle.node` exports
+`setAutomaticallyChecksForUpdates:`, and the JS side reaches it automatically ~30 s
+after launch (`initialize()` arms a timer → `initializeUpdater()` →
+`initializeMacSparkle()` → loads `sparkle.node`), with no user action involved.
+That the selector is called from that path specifically is inferred from Sparkle's
+standard wiring, not from disassembling the binary — but the observable fact stands:
+the clone's domain held `1` while its `Info.plist` said false.
+
+The working switch is Codex's own environment gate, injected by `a_wrapper_env`:
 
 ```js
 The = e => e.CODEX_SPARKLE_ENABLED === 'false'
 y5  = (e,t,n,r) => !The(r) && v5.includes(e) && t === n     // shouldIncludeSparkle
 ```
+
+Note the strict string comparison: **only** the exact string `'false'` disables it.
+`0`, `no` or an empty value all leave Sparkle enabled.
 
 It feeds `sparkleManager`'s `enableUpdater`, and `initializeUpdater()` returns
 early when false — the updater is never constructed, so nothing is fetched and the
@@ -192,6 +200,16 @@ non-app-behaviour keys (`fNe()` in the asar). With no MDM plist on the machine �
 the normal case — it is applied in full. If a machine *is* MDM-managed, that
 deployment wins and this stops working; that is the documented upstream
 precedence, not a bug to route around.
+
+Two details that are easy to misread:
+
+- The precedence is **replace, not merge**. If the managed plist happens to hold
+  *only* app-behaviour keys, the whole managed dict is discarded in favour of the
+  local tier — those keys are not merged on top of it.
+- The log line is `[updater] Auto-updates disabled by enterprise policy` (and
+  telemetry `reason: enterprise_policy`) **whichever tier supplied the value**. A
+  clone reporting "enterprise policy" is not evidence of MDM; the local file
+  produces exactly the same wording.
 
 ## 11. Clones cannot actually be overwritten by an update — but they still download one
 

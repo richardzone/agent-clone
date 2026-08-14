@@ -42,12 +42,22 @@ a_preflight() {
       { print "Missing helper 'Claude Helper${suffix}.app' — Electron helper naming may have changed"; return 1 }
   done
   print "   Helper naming ✓ (4 found)"
-  # The policy key a_post_install writes. If upstream renames or drops it the clone
-  # would silently resume hourly update downloads, so fail loudly here instead.
+  # What a_post_install depends on: the policy key itself, and the directory layout
+  # it gets written into. If upstream renames either, the clone would silently
+  # resume hourly update downloads, so fail loudly here instead.
   if ! strings -a "$src/Contents/Resources/app.asar" 2>/dev/null | grep -q 'disableAutoUpdates'; then
     print "disableAutoUpdates not found in app.asar — the auto-update policy key is gone"; return 1
   fi
   print "   disableAutoUpdates policy key ✓"
+  if ! strings -a "$src/Contents/Resources/app.asar" 2>/dev/null | grep -q 'configLibrary'; then
+    print "configLibrary not found in app.asar — the local-tier layout has changed"; return 1
+  fi
+  print "   configLibrary layout ✓"
+  # ⚠️ Not covered: the "-3p" in A_POLICY_ROOT_SUFFIX. It is built at runtime
+  # (`${appName}${suffix}`), so no literal to grep for — searching for "-3p" alone
+  # matches ~60 unrelated strings (chunk filenames, "custom-3p", …) and would pass
+  # even if the real suffix changed. Checklist item 7 in AGENTS.md is what catches
+  # that: after a rebuild, confirm the log actually says auto-updates are disabled.
 }
 
 a_rename_helpers() {

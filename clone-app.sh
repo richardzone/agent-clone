@@ -248,6 +248,17 @@ ADAPTER="$ADAPTER_DIR/${APP_KIND}.sh"
 [[ -f "$ADAPTER" ]] || die "No adapter for '$APP_KIND' (available: ${${kinds[@]:t:r}})"
 source "$ADAPTER"
 
+# The engine calls every hook unconditionally, so a missing one is a fatal zsh
+# "command not found" — and because most hooks run late, it would strike after the
+# bundle is copied and signed. Check the whole contract up front instead: an adapter
+# written against an older revision fails here, naming what to add, with nothing
+# modified yet.
+for _hook in a_preflight a_extra_plist a_rename_helpers a_wrapper_env a_sign_extra a_post_install a_notes; do
+  (( $+functions[$_hook] )) ||
+    die "Adapter ${APP_KIND}.sh does not define ${_hook}().\n   All seven hooks are required — write a no-op if there is nothing to do:\n     ${_hook}() { :; }\n   The contract is documented in adapters/README.md."
+done
+unset _hook
+
 # Step 8 renames the real binary to <NAME> and installs the wrapper at the original
 # <A_EXEC_NAME>. If the two collide, `mv f f` is a silent no-op (it returns 0), and the
 # wrapper then overwrites the genuine Electron binary — yielding an app that execs
@@ -459,8 +470,13 @@ step "Post-install: adapter setup inside the data directory"
 # in the policy file that disables auto-updates.
 # DATA_DIR holds a literal $HOME so it can be written into the wrapper verbatim;
 # expand it here, where a real path is needed. A --data-dir given as an absolute
-# path contains no $HOME and is passed through untouched.
-a_post_install "$NAME" "${DATA_DIR/\$HOME/$HOME}"
+# path contains no $HOME and is passed through untouched. Global replace (//), so a
+# hand-edited profile with $HOME appearing more than once still resolves fully.
+# On failure, die rather than letting set -e drop out silently: the bundle is
+# already installed and signed at this point, so an unexplained abort would leave a
+# clone that looks finished but never got its adapter setup.
+a_post_install "$NAME" "${DATA_DIR//\$HOME/$HOME}" ||
+  die "Adapter post-install failed (see above).\n   ${APP} is installed and signed, but its data-directory setup did not complete —\n   re-run ./clone-app.sh ${NAME} once the cause is fixed."
 
 # ===========================================================================
 step "Refreshing Launch Services / icon cache"

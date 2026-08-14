@@ -34,19 +34,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const [root, patchJson] = process.argv.slice(2);
-if (!root || !patchJson) {
-  console.error("Usage: write-config-library.js <configLibraryRoot> '<json object>'");
-  process.exit(1);
-}
-
-const patch = JSON.parse(patchJson);
-if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
-  throw new Error('the patch must be a JSON object');
-}
-
 const UUID_RE = /^[a-f0-9-]{36}$/;
-const metaPath = path.join(root, '_meta.json');
 
 function readJson(p) {
   try {
@@ -55,34 +43,86 @@ function readJson(p) {
     if (e.code === 'ENOENT') return undefined;
     // A corrupt file is worth reporting rather than silently replacing: it may be
     // a real configuration the user set up through the app's own Setup panel.
-    throw new Error(`${p} exists but is not valid JSON (${e.message}); refusing to overwrite it`);
+    // Deleting it is the documented recovery, so name the path in the message.
+    throw new Error(`${p} exists but is not valid JSON (${e.message}).\n` +
+      `   Refusing to overwrite it. If you did not create it deliberately, delete it and re-run.`);
   }
 }
 
-fs.mkdirSync(root, { recursive: true });
+// Write through a temp file in the same directory, then rename. rename(2) is
+// atomic within a filesystem, so a reader never observes a half-written file and
+// an interrupted run cannot leave a truncated one — which matters because a
+// truncated _meta.json is exactly what readJson() then refuses to touch, turning
+// one bad run into a permanently failing rebuild.
+// Two concurrent runs can still race to mint separate ids and leave one orphaned
+// <uuid>.json behind; that is harmless (a few bytes, and the patch is idempotent),
+// and not worth a lockfile here since the engine only ever calls this serially.
+function writeAtomic(p, data) {
+  const tmp = `${p}.tmp.${process.pid}`;
+  try {
+    fs.writeFileSync(tmp, data);
+    fs.renameSync(tmp, p);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch {}
+    throw e;
+  }
+}
 
-const meta = readJson(metaPath) ?? {};
-let appliedId = typeof meta.appliedId === 'string' && UUID_RE.test(meta.appliedId)
-  ? meta.appliedId
-  : null;
+function main() {
+  const [root, patchJson] = process.argv.slice(2);
+  if (!root || !patchJson) {
+    throw new Error("usage: write-config-library.js <configLibraryRoot> '<json object>'");
+  }
 
-const reusedId = appliedId !== null;
-if (!reusedId) appliedId = crypto.randomUUID();
+  let patch;
+  try {
+    patch = JSON.parse(patchJson);
+  } catch (e) {
+    throw new Error(`the patch argument is not valid JSON (${e.message}): ${patchJson}`);
+  }
+  if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
+    throw new Error(`the patch must be a JSON object, got: ${patchJson}`);
+  }
 
-const configPath = path.join(root, `${appliedId}.json`);
-const existing = readJson(configPath) ?? {};
-const merged = { ...existing, ...patch };
+  const metaPath = path.join(root, '_meta.json');
+  fs.mkdirSync(root, { recursive: true });
 
-// entries is what the app's Setup panel lists; keep the applied id present in it
-// so the configuration stays selectable there.
-const entries = Array.isArray(meta.entries) ? meta.entries : [];
-if (!entries.some(e => e && e.id === appliedId)) entries.push({ id: appliedId, name: 'Default' });
+  const meta = readJson(metaPath) ?? {};
+  let appliedId = typeof meta.appliedId === 'string' && UUID_RE.test(meta.appliedId)
+    ? meta.appliedId
+    : null;
 
-fs.writeFileSync(configPath, JSON.stringify(merged, null, 2) + '\n');
-fs.writeFileSync(metaPath, JSON.stringify({ ...meta, appliedId, entries }, null, 2) + '\n');
+  const reusedId = appliedId !== null;
+  if (!reusedId) appliedId = crypto.randomUUID();
 
-const changed = Object.entries(patch).filter(([k, v]) => JSON.stringify(existing[k]) !== JSON.stringify(v));
-console.error(`   config library: ${reusedId ? 'updated existing' : 'created'} ${appliedId.slice(0, 8)}…`);
-console.error(changed.length
-  ? `   set ${changed.map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', ')}`
-  : `   already had ${Object.keys(patch).join(', ')}, left unchanged`);
+  const configPath = path.join(root, `${appliedId}.json`);
+  const existing = readJson(configPath) ?? {};
+  const merged = { ...existing, ...patch };
+
+  // entries is what the app's Setup panel lists; keep the applied id present in it
+  // so the configuration stays selectable there.
+  const entries = Array.isArray(meta.entries) ? meta.entries : [];
+  if (!entries.some(e => e && e.id === appliedId)) entries.push({ id: appliedId, name: 'Default' });
+
+  // Config first, then the meta that points at it: if this is interrupted between
+  // the two, the orphaned config file is inert, whereas a meta pointing at a file
+  // that does not exist yet would be a dangling reference.
+  writeAtomic(configPath, JSON.stringify(merged, null, 2) + '\n');
+  writeAtomic(metaPath, JSON.stringify({ ...meta, appliedId, entries }, null, 2) + '\n');
+
+  const changed = Object.entries(patch).filter(([k, v]) => JSON.stringify(existing[k]) !== JSON.stringify(v));
+  console.error(`   config library: ${reusedId ? 'updated existing' : 'created'} ${appliedId.slice(0, 8)}…`);
+  console.error(changed.length
+    ? `   set ${changed.map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', ')}`
+    : `   already had ${Object.keys(patch).join(', ')}, left unchanged`);
+}
+
+try {
+  main();
+} catch (e) {
+  // The engine runs under `set -e` and calls this after the bundle is already
+  // signed, so a raw stack trace here would strand the user with a working-looking
+  // clone whose auto-update was never switched off. Say what broke and what to do.
+  console.error(`ERROR: could not write the clone's policy file.\n   ${e.message}`);
+  process.exit(1);
+}

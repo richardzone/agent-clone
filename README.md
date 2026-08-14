@@ -128,7 +128,7 @@ cloning, each through that app's own supported mechanism, scoped to the clone:
 | | How it is disabled |
 |---|---|
 | Claude | the `disableAutoUpdates` policy key, written into the clone's own data directory (`<Name>-3p/configLibrary/`) |
-| Codex | `CODEX_SPARKLE_ENABLED=false` in the wrapper, the same gate Codex uses to build without Sparkle |
+| Codex | `CODEX_SPARKLE_ENABLED=false` in the wrapper — the same predicate Codex's own code uses to decide whether Sparkle runs |
 
 Neither touches the original, and neither needs `sudo`. Note that `Info.plist` is
 *not* one of the working routes for either app — see [AGENTS.md](AGENTS.md) if you
@@ -149,7 +149,8 @@ User data lives outside the bundle, so rebuilding preserves logins and history.
 ## How the two apps differ
 
 The same pipeline works for both — rewrite identity, patch the asar in place,
-sync the integrity hash, inject a wrapper, sign inside-out, rebuild from profile.
+sync the integrity hash, inject a wrapper, sign inside-out, run the adapter's
+post-install step, rebuild from profile.
 The substantive differences are isolated in `adapters/`:
 
 | | Claude | Codex |
