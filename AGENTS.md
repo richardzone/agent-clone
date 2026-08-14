@@ -196,9 +196,33 @@ configuration.
 
 Launchers must contain no credentials. Codex selects a per-profile `CODEX_HOME`
 and forces file storage for account and MCP OAuth credentials. Claude selects a
-per-profile `CLAUDE_CONFIG_DIR` and clears higher-precedence ambient API/provider
-credentials so subscription login is deterministic. Keep literal `$HOME` values
-single-quoted in the profile, as described in section 8.
+per-profile `CLAUDE_CONFIG_DIR`. Keep literal `$HOME` values single-quoted in the
+profile, as described in section 8.
+
+Four properties of a generated launcher are load-bearing. Each replaced something
+that failed:
+
+1. **`#!/bin/zsh -f`.** A non-interactive zsh sources `~/.zshenv`, which can print
+   into piped output and can define a function that shadows the vendor command.
+2. **An absolute path in the `exec` line**, resolved once with `whence -p`.
+   `command -v` returns a same-named shell function, and the `-n` check still
+   passes.
+3. **`unset -m` over whole vendor namespaces, before any `export`.** A list of
+   individual credential variables fails open on every vendor release; see
+   "Why a namespace, not a list" in adapters/README.md. Reversing the order lets
+   the launcher clear the very variable that selects the profile.
+4. **The `# clone-agent-profile: <Name>` marker on line 2.** The engine refuses to
+   overwrite a launcher path whose line 2 does not match. Without it, a
+   `--cli-name` collision silently destroys a vendor CLI, an unrelated tool in the
+   same directory, or another profile's launcher — and still prints `Done.` The
+   `.app` path has had an equivalent provenance guard from the beginning; this is
+   that guard, for the other half of the profile. Do not reword the marker into
+   prose: it is parsed.
+
+Profile names must also be unique **case-insensitively**. macOS filesystems are
+case-insensitive by default, and the bundle ID and default CLI command both
+lowercase the name — so `Work` and `WORK` would share one profile file, one
+launcher and one data directory.
 
 ---
 

@@ -60,12 +60,14 @@ Options:
   <Name>               clone name; also the .app filename, display name and process name
   --app <kind>         which app to clone: claude | codex (required on first run,
                        case-insensitive)
-  --target <target>    what to manage: all | app | cli (default: all on new profiles;
-                       legacy profiles without this field remain app-only)
+  --target <target>    what to manage: all | app | cli (default: all). Stored in the
+                       profile, so it cannot be combined with --all
   --icon <path>        desktop icon, .icns or .png (required for app/all targets;
                        png is converted automatically)
   --cli-name <name>    generated CLI command name (default: <kind>-<lowercase-name>)
-  --cli-bin-dir <path> launcher directory (default: $HOME/.local/bin)
+  --cli-bin-dir <path> launcher directory (default: $HOME/.local/bin); must be an
+                       absolute path, or start with a literal $HOME
+  --force              overwrite a launcher this profile did not generate
   --dry-run            preview only: run every check, print the plan, change nothing.
                        Works with any invocation, including --all and --init
   --bundle-id <id>     override the bundle ID (default: derived from the clone name)
@@ -87,20 +89,21 @@ EOF
 # ===========================================================================
 NAME="" APP_KIND="" TARGET="" ICON="" BUNDLE_ID="" DATA_DIR="" SRC="" DEST_DIR=""
 CLI_NAME="" CLI_BIN_DIR=""
-DO_ALL=0 DO_INIT=0 DRY_RUN=0 TARGET_SET=0
+DO_ALL=0 DO_INIT=0 DRY_RUN=0 TARGET_SET=0 FORCE=0
 
 while (( $# )); do
   case "$1" in
     --all)       DO_ALL=1; shift ;;
     --init)      DO_INIT=1; shift ;;
     --dry-run)   DRY_RUN=1; shift ;;
+    --force)     FORCE=1; shift ;;
     --list)
       profiles=("$PROFILE_DIR"/*.conf)
       (( ${#profiles} )) || { print "No profiles configured yet."; exit 0 }
       print "Configured profiles:"
       for p in $profiles; do
         unset P_APP P_TARGET; source "$p"
-        printf "  %-22s %-9s %s\n" "${${p:t}:r}" "${${P_APP:-claude}:l}" "${${P_TARGET:-app}:l}"
+        printf "  %-22s %-9s %s\n" "${${p:t}:r}" "${${P_APP:-claude}:l}" "${${P_TARGET:-all}:l}"
       done
       exit 0 ;;
     --app)       need_val "$@"; APP_KIND="${2:l}"; shift 2 ;;   # :l lowercases, so --app Codex works
@@ -130,7 +133,7 @@ if (( DO_INIT )); then
   [[ -z "$NAME" ]] || die "--init is interactive; don't also pass a clone name (got '$NAME')"
   # --init collects only name/app/target/icon and hands off to the normal path; the other
   # options would not be passed along, so reject them rather than ignore them.
-  [[ -z "$APP_KIND$TARGET$ICON$BUNDLE_ID$DATA_DIR$SRC$DEST_DIR$CLI_NAME$CLI_BIN_DIR" ]] ||
+  [[ -z "$APP_KIND$TARGET$ICON$BUNDLE_ID$DATA_DIR$SRC$DEST_DIR$CLI_NAME$CLI_BIN_DIR" ]] && (( ! FORCE )) ||
     die "--init takes no other options (except --dry-run).\n   For precise control use: ./clone-agent.sh <Name> --app <kind> --target <target> [options...]"
   [[ -t 0 ]] ||
     die "--init needs an interactive terminal. In scripts use: ./clone-agent.sh <Name> --app <kind> --target <target> [options...]"
@@ -243,11 +246,19 @@ Proceed? [y/N] "
 fi
 
 if (( DO_ALL )); then
+  # --target used to be forwarded into every child invocation, and the child then
+  # persisted it: a single `--all --target cli` silently rewrote every profile to
+  # cli-only, after which the documented post-upgrade `--all` stopped rebuilding
+  # desktop clones without saying so — on a tool whose clones cannot auto-update.
+  # Each profile rebuilds with the target it stored; change one at a time.
+  (( TARGET_SET )) &&
+    die "--all rebuilds each profile with its own stored target.\n   To change one: ./clone-agent.sh <Name> --target ${TARGET}"
+  (( FORCE )) &&
+    die "--force overwrites a launcher another profile owns; apply it to that profile by name, not to --all"
   profiles=("$PROFILE_DIR"/*.conf)
   (( ${#profiles} )) || die "No profiles in profiles/ — create a clone before using --all"
   pass=()
   (( DRY_RUN )) && pass=(--dry-run)
-  (( TARGET_SET )) && pass+=(--target "$TARGET")
   print -P "%F{cyan}Rebuilding ${#profiles} profile(s)%f"
   for p in $profiles; do "$SELF" "${${p:t}:r}" $pass; done
   if (( DRY_RUN )); then
@@ -265,13 +276,23 @@ fi
 # ===========================================================================
 # Profile: stored values act as defaults; command-line arguments win
 # ===========================================================================
+# macOS filesystems are case-insensitive by default, so profiles/Work.conf and
+# profiles/WORK.conf are the same file — and BUNDLE_ID and the CLI command name
+# both lowercase the profile name anyway. Two profiles differing only in case
+# would silently share one profile file, one launcher and one data directory:
+# two nominally isolated accounts that are physically one, which is the exact
+# opposite of the point. Catch it before anything is written.
+for p in "$PROFILE_DIR"/*.conf; do
+  if [[ "${${p:t}:r:l}" == "${NAME:l}" && "${${p:t}:r}" != "$NAME" ]]; then
+    die "Profile '${${p:t}:r}' already exists and differs from '$NAME' only by case.\n   They would share one profile, one launcher and one data directory — pick a distinct name."
+  fi
+done
+
 PROFILE="$PROFILE_DIR/${NAME}.conf"
-PROFILE_EXISTS=0
 if [[ -f "$PROFILE" ]]; then
-  PROFILE_EXISTS=1
   source "$PROFILE"
   [[ -n "$APP_KIND"  ]] || APP_KIND="${${P_APP:-claude}:l}"
-  [[ -n "$TARGET"    ]] || TARGET="${${P_TARGET:-app}:l}"
+  [[ -n "$TARGET"    ]] || TARGET="${${P_TARGET:-all}:l}"
   [[ -n "$ICON"      ]] || ICON="$P_ICON"
   [[ -n "$BUNDLE_ID" ]] || BUNDLE_ID="$P_BUNDLE_ID"
   [[ -n "$DATA_DIR"  ]] || DATA_DIR="$P_DATA_DIR"
@@ -291,11 +312,7 @@ ADAPTER="$ADAPTER_DIR/${APP_KIND}.sh"
 [[ -f "$ADAPTER" ]] || die "No adapter for '$APP_KIND' (available: ${${kinds[@]:t:r}})"
 source "$ADAPTER"
 
-# Profiles created before CLI support intentionally remain app-only. New
-# profiles default to all, including non-interactive creation.
-if [[ -z "$TARGET" ]]; then
-  (( PROFILE_EXISTS )) && TARGET="app" || TARGET="all"
-fi
+: ${TARGET:=all}
 [[ "$TARGET" == all || "$TARGET" == app || "$TARGET" == cli ]] ||
   die "--target must be all, app, or cli (got '$TARGET')"
 TARGET_APP=0 TARGET_CLI=0
@@ -320,7 +337,16 @@ expand_home_path() {
   fi
 }
 CLI_BIN_REAL="$(expand_home_path "$CLI_BIN_DIR")"
+# A quoted '~/bin' reaches us as a literal tilde, which expand_home_path does not
+# touch — it would silently create a directory named '~' relative to wherever the
+# script was run from, install the launcher there, and store that in the profile.
+# Only $HOME-prefixed and absolute paths are portable, so require one.
+[[ "$CLI_BIN_REAL" == /* ]] ||
+  die "--cli-bin-dir must be absolute or start with a literal \$HOME (got '$CLI_BIN_DIR').\n   A quoted '~/bin' is not expanded; use '\$HOME/bin' or the full path."
 CLI_LAUNCHER="$CLI_BIN_REAL/$CLI_NAME"
+# Line 2 of every generated launcher. Machine-readable on purpose: the overwrite
+# guard compares against it, so it must not be reworded into prose.
+CLI_MARKER="# clone-agent-profile: ${NAME}"
 CLI_HOME="${A_CLI_HOME_TEMPLATE//<NAME>/$NAME}"
 CLI_HOME_REAL="$(expand_home_path "$CLI_HOME")"
 
@@ -416,10 +442,29 @@ if (( TARGET_APP )); then
   a_preflight "$SRC" || die "Preflight failed — see \"When preflight fails\" in AGENTS.md"
 fi
 if (( TARGET_CLI )); then
-  CLI_COMMAND_PATH="$(command -v "$A_CLI_COMMAND" 2>/dev/null || true)"
+  [[ -n "$A_CLI_COMMAND" && -n "$A_CLI_HOME_TEMPLATE" && ${#A_CLI_ENV_NAMESPACES} -gt 0 ]] ||
+    die "adapters/${APP_KIND}.sh is missing CLI metadata (A_CLI_COMMAND / A_CLI_HOME_TEMPLATE / A_CLI_ENV_NAMESPACES)"
+  # whence -p, not command -v: if the vendor command also exists as a shell
+  # function, command -v prints the function name, the -n check below still
+  # passes, and the launcher would bake a bare name — reopening the hijack that
+  # baking an absolute path exists to close.
+  CLI_COMMAND_PATH="$(whence -p "$A_CLI_COMMAND" 2>/dev/null || true)"
   [[ -n "$CLI_COMMAND_PATH" ]] ||
     die "${A_LABEL} CLI command '$A_CLI_COMMAND' was not found in PATH — install it before creating a CLI target"
   info "CLI command: $CLI_COMMAND_PATH"
+  # Refuse to overwrite anything this profile did not generate. The .app path has
+  # had a provenance guard from the start (step 2 below); the launcher path had
+  # none, so a --cli-name collision would destroy a vendor CLI, an unrelated tool
+  # in the same directory, or another profile's launcher — and report success.
+  if [[ -e "$CLI_LAUNCHER" ]] && (( ! FORCE )); then
+    if [[ "$(head -c 512 "$CLI_LAUNCHER" 2>/dev/null | sed -n 2p)" != "$CLI_MARKER" ]]; then
+      linknote=""
+      [[ -L "$CLI_LAUNCHER" ]] &&
+        linknote="\n   It is a symlink: writing would clobber $(readlink "$CLI_LAUNCHER"), not the link."
+      die "$CLI_LAUNCHER exists and was not generated for profile '${NAME}'.${linknote}\n   Pick another --cli-name, remove that file yourself, or pass --force."
+    fi
+  fi
+  a_cli_preflight || die "CLI preflight failed"
   case ":$PATH:" in
     *":$CLI_BIN_REAL:"*) ;;
     *) warn "CLI launcher directory is not on PATH: $CLI_BIN_REAL" ;;
@@ -572,14 +617,29 @@ fi
 # ==========================================================================
 if (( TARGET_CLI )); then
   step "Installing isolated CLI launcher"
-  mkdir -p -m 700 "$CLI_BIN_REAL"
-  mkdir -p -m 700 "$CLI_HOME_REAL"
-  umask 077
+  # The launcher directory is usually shared with pipx / uv / pip --user, so
+  # create it if missing but leave its mode alone. The agent home holds live
+  # credentials, so tighten that one explicitly: `mkdir -m` only applies its mode
+  # to directories it actually creates, and this one often already exists.
+  mkdir -p "$CLI_BIN_REAL"
+  mkdir -p "$CLI_HOME_REAL"
+  chmod 700 "$CLI_HOME_REAL"
   {
-    print '#!/bin/zsh'
-    print "# Generated by clone-agent.sh for profile ${NAME}."
+    # -f (NO_RCS): a non-interactive zsh still sources ~/.zshenv, which would let
+    # a dotfile banner corrupt piped output and let a function named after the
+    # vendor command shadow the exec below. Safe here only because the exec line
+    # carries an absolute path and needs nothing from PATH.
+    print '#!/bin/zsh -f'
+    print "$CLI_MARKER"
+    print "# Regenerate with ./clone-agent.sh ${NAME}"
+    # Clear the vendor's entire namespace, then let the adapter set what this
+    # profile needs. A hand-maintained denylist of individual credential
+    # variables rots with every vendor release — this one already had — whereas
+    # a namespace wipe excludes new variables by construction.
+    # Order is load-bearing: the adapter's exports live inside these namespaces.
+    for ns in $A_CLI_ENV_NAMESPACES; do print "unset -m ${(qq)ns}"; done
     a_cli_wrapper_env "$NAME"
-    a_cli_exec
+    a_cli_exec "$CLI_COMMAND_PATH"
   } > "$CLI_LAUNCHER"
   chmod 700 "$CLI_LAUNCHER"
 fi

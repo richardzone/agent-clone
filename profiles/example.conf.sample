@@ -17,8 +17,8 @@
 # Which app to clone; maps to adapters/<kind>.sh. Currently claude | codex
 P_APP='claude'
 
-# What this profile manages: all | app | cli. New profiles default to all; old
-# generated profiles without this field are treated as app for compatibility.
+# What this profile manages: all | app | cli. Defaults to all. Belongs to the
+# profile, so --all never overrides it — change it per profile.
 P_TARGET='all'
 
 # Icon path (.icns). Relative paths resolve against the repo root, which keeps
@@ -45,5 +45,11 @@ P_DEST_DIR='/Applications'
 # Generated CLI launcher. Defaults are derived from P_APP and the profile name.
 P_CLI_NAME='claude-myclaude'
 
-# $HOME stays literal for portability and expands when clone-agent.sh runs.
+# $HOME stays literal for portability and expands when clone-agent.sh runs. A
+# quoted '~' is NOT expanded and is rejected — write $HOME or an absolute path.
 P_CLI_BIN_DIR='$HOME/.local/bin'
+
+# Source app version this profile was last built against. The engine warns when
+# the installed app has moved on, because some upstream invariants an adapter
+# depends on (see AGENTS.md §10) cannot be tested by preflight.
+P_VERIFIED_SOURCE_VERSION='0.2026.8.5'

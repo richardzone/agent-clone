@@ -64,10 +64,13 @@ sample icons in `icons/` are there if you just want to try the flow first.
 | `./clone-agent.sh ... --dry-run` | Preview only — append to any invocation above |
 | `./clone-agent.sh --help` | Full argument reference |
 
-Other options: `--target`, `--cli-name`, `--cli-bin-dir`, `--bundle-id`,
-`--data-dir`, `--source`, `--dest-dir`. `--app` and `--target` are
-case-insensitive. Existing profiles created before CLI support remain app-only
-until explicitly changed with `--target all` or `--target cli`.
+Other options: `--target`, `--cli-name`, `--cli-bin-dir`, `--force`,
+`--bundle-id`, `--data-dir`, `--source`, `--dest-dir`. `--app` and `--target` are
+case-insensitive.
+
+`--target` belongs to a profile, so it cannot be combined with `--all`: each
+profile rebuilds with the target it stored. Change one with
+`./clone-agent.sh <Name> --target <target>`.
 
 For app targets, a profile name is simultaneously the `.app` filename, display
 name, process name and data directory. For CLI targets it also contributes to the
@@ -185,6 +188,8 @@ adapters/claude.sh                  Claude support
 adapters/codex.sh                   Codex support
 tools/patch-asar-productname.js     in-place productName rewrite inside app.asar
 tools/make-icon.sh                  png -> icns (crop, center, round, all sizes)
+tools/codex-cli-launcher            copied into a Codex clone; keeps an OpenAI-signed
+tools/codex-cli-launcher.cjs          Node parent above codex so Browser Use works
 icons/                              icon sources and generated .icns
 profiles/example.conf.sample        profile field reference
 profiles/*.conf                     per-clone parameters, generated (not tracked)
@@ -207,19 +212,51 @@ that actually has Pillow, rather than trusting whichever one is first on `PATH`.
 
 ## CLI isolation
 
-The generated launcher is intentionally tiny: it contains no credentials and
-forwards every argument to the installed vendor CLI.
+The generated launcher is intentionally tiny: it contains no credentials, clears
+the vendor's environment namespace, selects this profile's directory, and forwards
+every argument to the installed vendor CLI.
 
-- Claude sets `CLAUDE_CONFIG_DIR` and clears ambient API-key/cloud-provider
-  variables so `/login` uses the intended subscription account.
-- Codex sets `CODEX_HOME` and forces both account and MCP OAuth credential stores
-  to `file`, keeping them inside that profile's directory.
+- Claude clears `ANTHROPIC_*` and `CLAUDE_*`, then sets `CLAUDE_CONFIG_DIR`, so
+  `/login` uses the intended subscription account.
+- Codex clears `OPENAI_*` and `CODEX_*`, then sets `CODEX_HOME` and forces both
+  account and MCP OAuth credential stores to `file`, keeping them inside that
+  profile's directory.
+
+Clearing the whole namespace rather than a list of known credential variables is
+deliberate: a list has to be updated every time a vendor adds one, and silently
+leaks until someone notices. Two consequences worth knowing:
+
+- **Per-profile settings go in the profile's own config file** —
+  `$CLAUDE_CONFIG_DIR/settings.json` (which has an `env` block) or
+  `$CODEX_HOME/config.toml` — not in your shell profile. That is where an
+  isolation tool wants them anyway, since those files are isolated with the
+  account and your shell environment is not.
+- **MCP servers inherit the cleared environment.** If one needs an API key, give
+  it a per-server `env` entry in that profile's MCP config.
 
 Make sure `~/.local/bin` is on `PATH`, then run the command printed at the end of
 setup and log in on first use. Override the command or install directory with
-`--cli-name` and `--cli-bin-dir`. The isolation knobs are documented by the
+`--cli-name` and `--cli-bin-dir`. The engine refuses to overwrite a file it did
+not generate for that profile, so a name collision is reported rather than acted
+on; `--force` overrides. The isolation knobs are documented by the
 [official OpenAI configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
 and [Claude Code environment-variable reference](https://code.claude.com/docs/en/env-vars).
+
+### Without this tool
+
+CLI isolation does not strictly need a launcher — the config directory is the
+whole mechanism, so a shell alias works too:
+
+```bash
+alias claude-work='CLAUDE_CONFIG_DIR=~/.claude-work claude'
+alias codex-work='CODEX_HOME=~/.codex-work codex'
+```
+
+What you give up: aliases exist only in an interactive shell, so scripts, `make`,
+cron and editor task runners do not see them; nothing clears an ambient
+`ANTHROPIC_API_KEY` (which makes the Claude CLI bill per token and ignore your
+subscription) or an ambient `OPENAI_API_KEY`; and Codex's MCP OAuth tokens stay in
+the shared Keychain entry rather than the profile.
 
 ---
 

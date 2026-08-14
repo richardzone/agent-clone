@@ -10,6 +10,11 @@ A_BUNDLE_ID_BASE="com.anthropic.claudefordesktop"
 A_FRAMEWORK=""                                        # main framework name; empty = nothing special
 A_CLI_COMMAND="claude"
 A_CLI_HOME_TEMPLATE='$HOME/.claude-<NAME>'
+# Namespaces the generated launcher clears before setting anything. Deliberately
+# CLAUDE_* rather than CLAUDE_CODE_*: the identity-relevant variables are spread
+# across both (CLAUDE_SECURESTORAGE_CONFIG_DIR is in the wider one, and setting it
+# empty re-points the profile at the default account's keychain entry).
+A_CLI_ENV_NAMESPACES=('ANTHROPIC_*' 'CLAUDE_*')
 
 # Claude's keychain service name derives from productName in the asar's
 # package.json, so changing productName yields a separate "<Name> Safe Storage"
@@ -56,17 +61,18 @@ a_extra_plist() { :; }
 # Claude only needs the Electron-level isolation, so the wrapper gets no extra env.
 a_wrapper_env() { :; }
 
-# CLI launchers default to subscription login. Clear higher-precedence credential
-# sources so a shell-level API key or cloud-provider switch cannot silently make
-# this profile use a different account or billing path.
+a_cli_preflight() { :; }
+
+# The engine has already cleared A_CLI_ENV_NAMESPACES by the time this runs, so
+# the profile's own directory is the only thing left to establish. Per-profile
+# tuning belongs in that directory's settings.json, which is isolated with it —
+# not in ambient environment variables, which are not.
 a_cli_wrapper_env() {
   local name="$1"
   print "export CLAUDE_CONFIG_DIR=\"${A_CLI_HOME_TEMPLATE//<NAME>/$name}\""
-  print 'unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN'
-  print 'unset CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY CLAUDE_CODE_USE_MANTLE'
 }
 
-a_cli_exec() { print 'exec claude "$@"'; }
+a_cli_exec() { print "exec ${(qq)1} \"\$@\""; }
 
 a_sign_extra() {
   local app="$1" h f
@@ -83,6 +89,11 @@ a_sign_extra() {
 a_notes() { :; }
 
 a_cli_notes() {
-  print "  Claude CLI uses subscription login; ambient API keys and cloud-provider"
-  print "  selectors are cleared by the generated launcher. Run /login on first use."
+  local name="$1"
+  print "  The launcher clears ANTHROPIC_* and CLAUDE_* before selecting this profile,"
+  print "  so subscription login is deterministic. Run /login on first use."
+  print "  Per-profile settings belong in \$CLAUDE_CONFIG_DIR/settings.json (it has an"
+  print "  'env' block) — ambient variables no longer reach the CLI, and MCP servers"
+  print "  spawned by it inherit the cleared environment too, so give any that need an"
+  print "  API key a per-server 'env' entry in that profile's MCP config."
 }

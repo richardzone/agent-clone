@@ -27,6 +27,10 @@ A_KEYCHAIN_ISOLATED=0
 # Confirmed present in the asar: resolveCodexHome() reads process.env.CODEX_HOME ?? ~/.codex
 A_CODEX_HOME_TEMPLATE='$HOME/.codex-<NAME>'
 A_CLI_HOME_TEMPLATE="$A_CODEX_HOME_TEMPLATE"
+# Namespaces the generated launcher clears before setting anything. OPENAI_* covers
+# OPENAI_API_KEY, which is the default provider's env_key and would otherwise bill
+# this profile's session to an API-key account instead of its ChatGPT login.
+A_CLI_ENV_NAMESPACES=('OPENAI_*' 'CODEX_*')
 
 # The framework's version directory is named after the Chromium version (e.g.
 # 151.0.7922.76), not Claude's "A", so it can only be resolved through the
@@ -112,6 +116,25 @@ a_wrapper_env() {
   print 'export CODEX_CLI_PATH="$APP_DIR/../Resources/codex-cli-launcher"'
 }
 
+# codex silently ignores an unknown -c key but rejects an invalid *value* for a
+# known one, naming the key in the error. So a deliberately-bogus value is a
+# canary: if the key is ever renamed upstream, the two overrides below would stop
+# applying with no symptom at all, and MCP OAuth credentials would quietly revert
+# to the shared Keychain entry that README.md documents as un-isolatable.
+a_cli_preflight() {
+  local key out
+  for key in cli_auth_credentials_store mcp_oauth_credentials_store; do
+    out="$(CODEX_HOME="$(mktemp -d)" codex -c "${key}=\"__canary__\"" login status 2>&1 || true)"
+    if [[ "$out" != *"$key"* ]]; then
+      print "codex no longer rejects a bogus value for '${key}' — the credential-store"
+      print "override may have been renamed upstream, which would silently fall back to"
+      print "the shared Keychain. Check the config reference before relying on isolation."
+      return 1
+    fi
+  done
+  print "   Credential-store overrides still recognised ✓"
+}
+
 a_cli_wrapper_env() {
   local name="$1"
   print "export CODEX_HOME=\"${A_CLI_HOME_TEMPLATE//<NAME>/$name}\""
@@ -120,7 +143,7 @@ a_cli_wrapper_env() {
 # Keep both account auth and MCP OAuth credentials in the profile-specific
 # CODEX_HOME instead of allowing a shared macOS Keychain entry.
 a_cli_exec() {
-  print 'exec codex -c '\''cli_auth_credentials_store="file"'\'' -c '\''mcp_oauth_credentials_store="file"'\'' "$@"'
+  print "exec ${(qq)1} -c 'cli_auth_credentials_store=\"file\"' -c 'mcp_oauth_credentials_store=\"file\"' \"\$@\""
 }
 
 a_sign_extra() {
@@ -173,6 +196,10 @@ a_notes() {
 
 
 a_cli_notes() {
-  print "  Codex CLI auth and MCP OAuth credentials are forced to file storage under"
-  print "  the profile-specific \$CODEX_HOME. Run 'codex login' through this launcher."
+  print "  Account auth and MCP OAuth credentials are forced to file storage under the"
+  print "  profile-specific \$CODEX_HOME. Run 'codex login' through this launcher."
+  print "  The launcher clears OPENAI_* and CODEX_* first, so an ambient OPENAI_API_KEY"
+  print "  can no longer bill this profile to a different account. MCP servers spawned"
+  print "  by the CLI inherit that cleared environment — give any that need a key a"
+  print "  per-server 'env' entry under mcp_servers in \$CODEX_HOME/config.toml."
 }

@@ -44,8 +44,9 @@ Consequently:
 | `A_SOURCE_DEFAULT` | Default path to the source app; overridable with `--source` |
 | `A_EXEC_NAME` | Original executable name under `Contents/MacOS/`. The engine renames it to the clone name and writes the wrapper in its place — that way `CFBundleExecutable` never changes while the process name shows the clone |
 | `A_BUNDLE_ID_BASE` | Bundle ID prefix. The engine forms `<base>.<lowercased clone name>`; overridable with `--bundle-id` |
-| `A_CLI_COMMAND` | Vendor CLI command found through `PATH` and invoked by the generated profile launcher |
+| `A_CLI_COMMAND` | Vendor CLI command. The engine resolves it once with `whence -p` and bakes the absolute path into the launcher — never `command -v`, which would return a same-named shell function |
 | `A_CLI_HOME_TEMPLATE` | Literal portable path containing `<NAME>`, such as `$HOME/.claude-<NAME>` |
+| `A_CLI_ENV_NAMESPACES` | Array of globs the launcher clears before the adapter sets anything, e.g. `('ANTHROPIC_*' 'CLAUDE_*')`. See "Why a namespace, not a list" below |
 
 Get `A_EXEC_NAME` wrong and the engine fails at step 8 with "Main executable not
 found".
@@ -64,7 +65,7 @@ documentation:
 
 ## Functions
 
-**All nine must be defined** — the engine calls the target-relevant set. Write a no-op
+**All ten must be defined** — the engine calls the target-relevant set. Write a no-op
 for the ones you don't need:
 
 ```zsh
@@ -81,8 +82,9 @@ Call order (numbers refer to the engine's steps):
 | 8/9 install wrapper | `a_wrapper_env` | clone name |
 | 9/9 re-sign (**before** the engine's generic loops) | `a_sign_extra` | clone app path |
 | After everything succeeds | `a_notes` | clone name |
+| CLI preflight, before any writes | `a_cli_preflight` | none |
 | CLI launcher generation | `a_cli_wrapper_env` | clone name |
-| CLI launcher generation | `a_cli_exec` | none |
+| CLI launcher generation | `a_cli_exec` | resolved absolute path to the vendor CLI |
 | After CLI succeeds | `a_cli_notes` | clone name |
 
 ### `a_preflight <src>`
@@ -99,9 +101,15 @@ what is missing — that is what tells the user which line of the adapter to fix
 *inside the function*. A failing command in there will **not** abort; execution
 continues to the end and returns the status of the last command.
 
-The other five functions are called directly, so `set -e` applies normally: any
-non-zero return inside them terminates the whole script. Append `|| true` to
-commands that are expected to fail sometimes.
+`a_cli_preflight` is called the same way (`a_cli_preflight || die ...`) and carries
+the same requirement.
+
+The other eight functions are called directly, so `set -e` applies normally: any
+non-zero return inside them terminates the whole script — silently, since there is
+no `die` to print anything. Append `|| true` to commands that are expected to fail
+sometimes, and `|| die "..."` to ones whose failure actually matters. A bare
+`codesign --verify ... >/dev/null 2>&1` in `a_sign_extra` is the trap: it reads
+like a check, and it aborts the whole run with an empty terminal.
 
 ### `a_rename_helpers <app> <name>`
 
@@ -160,12 +168,45 @@ caveats. No-op if there are none.
 
 ### CLI functions
 
-`a_cli_wrapper_env <name>` prints portable `export`/`unset` statements into the
-generated launcher. `a_cli_exec` prints its final `exec` command and must forward
-`"$@"`. `a_cli_notes <name>` explains first-login or authentication behavior.
-Launchers must never embed tokens. Codex forces file-based account and MCP OAuth
-stores inside its profile-specific `CODEX_HOME`; Claude clears higher-precedence
-ambient API/provider credentials so subscription login cannot be silently bypassed.
+`a_cli_preflight` verifies whatever the CLI half depends on, before anything is
+written. Same `return 1` rule as `a_preflight`. No-op if there is nothing to check.
+
+`a_cli_wrapper_env <name>` prints the `export` lines that select this profile's
+isolated directory. It does **not** need to clear anything — the engine has
+already emitted `unset -m` for every glob in `A_CLI_ENV_NAMESPACES` by the time it
+runs, and that ordering is load-bearing, since these exports live inside those
+same namespaces.
+
+`a_cli_exec <resolved-path>` prints the final `exec` line and must forward `"$@"`.
+Use the path it is given rather than the bare command name: the launcher runs
+under `#!/bin/zsh -f`, so `PATH` may be whatever the caller had, and a shell
+function named after the vendor command must not be able to shadow it.
+
+`a_cli_notes <name>` explains first-login and authentication behaviour. Mention
+that MCP servers inherit the cleared environment — that failure mode is not
+guessable from its symptom.
+
+Launchers must never embed tokens.
+
+#### Why a namespace, not a list
+
+The obvious implementation is a list of credential variables to `unset`. It was
+tried and it rotted: by the time this was reviewed, the Claude launcher was
+clearing four of seven provider selectors and none of the identity variables that
+the vendor documents as outranking `/login`. A denylist fails **open** — every
+variable the vendor adds is one the launcher does not know to clear, and nothing
+reports it.
+
+Clearing the whole namespace fails **closed** instead: a new vendor variable is
+excluded by construction. The cost is that legitimate per-profile tuning has to
+move out of the ambient environment and into the profile's own config file
+(`settings.json` for Claude, `config.toml` for Codex) — which is where an
+isolation tool wants it anyway, since those files are isolated with the profile
+and ambient variables are not.
+
+Two mechanical rules when adding an adapter: quote every glob (a generated
+launcher does not inherit the engine's `NULL_GLOB`, so a bare `FOO_*` dies with
+`no matches found`), and never emit an `export` before the wipe.
 
 ---
 
@@ -184,5 +225,5 @@ re-sign → **actually launch it and confirm the processes are healthy**. A run 
 completes without errors proves nothing; the verification checklist in
 [../AGENTS.md](../AGENTS.md) has ready-to-use commands.
 
-Once it works by hand, slot each step into one of the six functions above — that's
+Once it works by hand, slot each step into one of the ten functions above — that's
 your adapter.
