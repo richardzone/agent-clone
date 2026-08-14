@@ -383,12 +383,23 @@ fi
 info "Name       : $NAME"
 info "Type       : $APP_KIND ($A_LABEL)"
 info "Target     : $TARGET"
+SRC_VERSION=""
 if (( TARGET_APP )); then
+  SRC_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$SRC/Contents/Info.plist" 2>/dev/null || true)"
   info "App        : $APP"
-  info "Source     : $SRC ($(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$SRC/Contents/Info.plist" 2>/dev/null))"
+  info "Source     : $SRC ($SRC_VERSION)"
   info "Bundle ID  : $BUNDLE_ID"
   info "App data   : $DATA_DIR"
   info "Icon       : ${ICON#$REPO_DIR/}"
+  # Adapters depend on upstream invariants that preflight cannot test — most
+  # sharply the Browser Use process-chain contract (AGENTS.md §10), which can stop
+  # being honoured with every structural check still passing. Recording the
+  # version this profile was last built against at least turns that from silent
+  # into noticed.
+  if [[ -n "$P_VERIFIED_SOURCE_VERSION" && -n "$SRC_VERSION" && "$P_VERIFIED_SOURCE_VERSION" != "$SRC_VERSION" ]]; then
+    warn "${A_LABEL} moved from ${P_VERIFIED_SOURCE_VERSION} to ${SRC_VERSION} since this profile was last built."
+    warn "   Structural checks still pass, but re-test the app-specific features you rely on."
+  fi
 fi
 if (( TARGET_CLI )); then
   info "CLI        : $CLI_LAUNCHER"
@@ -594,6 +605,9 @@ icon_store="$ICON"
   print "P_DEST_DIR=${(qq)DEST_DIR}"
   print "P_CLI_NAME=${(qq)CLI_NAME}"
   print "P_CLI_BIN_DIR=${(qq)CLI_BIN_DIR}"
+  # A cli-only run learns nothing about the app, so carry the previous value
+  # forward rather than blanking it.
+  print "P_VERIFIED_SOURCE_VERSION=${(qq)${SRC_VERSION:-$P_VERIFIED_SOURCE_VERSION}}"
 } > "$PROFILE"
 
 print -P "\n%F{green}Done.%f"

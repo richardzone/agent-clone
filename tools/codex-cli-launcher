@@ -1,6 +1,11 @@
-#!/bin/zsh
+#!/bin/zsh -f
 # Keep an OpenAI-signed executable between the cloned Electron process and the
 # bundled codex binary. Browser Use authenticates the node_repl process and two
 # ancestors, so an ad-hoc-signed clone cannot launch codex directly.
+#
+# -f (NO_RCS) is load-bearing: a non-interactive zsh still sources ~/.zshenv, and
+# anything that prints there lands on this process's stdout — which the app-server
+# uses as a JSON-RPC channel, so a dotfile banner breaks the handshake. Nothing
+# here needs PATH: both paths below are absolute.
 resources_dir="${0:A:h}"
 exec "$resources_dir/cua_node/bin/node" "$resources_dir/codex-cli-launcher.cjs" "$@"

@@ -160,6 +160,33 @@ spawns the untouched signed `Resources/codex`, producing the accepted chain
 `node_repl → codex → node`. Do not ad-hoc sign `Resources/codex`, the bundled Node,
 or `node_repl`, and do not replace this with a bypass in the authorization module.
 
+Be accurate about what this does and does not preserve. The check the module
+enforces is "these three processes carry an OpenAI signing identity". After this
+change the middle process is an OpenAI-signed **general-purpose Node interpreter
+running `Resources/codex-cli-launcher.cjs`**, a plain file inside the clone that
+the local user can edit — replacing its body and re-sealing the bundle with a
+credential-free `codesign --force --sign -` is enough to run arbitrary JS under
+that trusted identity. The outer seal detects tampering, and same-user local code
+execution is already a precondition, so the practical exposure is small. But this
+is a launch-path correction that *relaxes* the property from "only OpenAI-signed
+code" to "OpenAI-signed Node running a local script" — not a no-op. Call it a
+deliberate trade-off of running an ad-hoc-signed clone, not "not a bypass".
+
+Both signature assertions in `a_preflight` are warnings, not hard failures: the
+identifiers and Team ID are pinned to what OpenAI ships today, and a rotation
+should not block building a clone that would otherwise work.
+
+Two launch-path details that are easy to undo by accident:
+
+- `tools/codex-cli-launcher` must keep `#!/bin/zsh -f`. A non-interactive zsh
+  still sources `~/.zshenv`, and this process's stdout **is** the app-server's
+  JSON-RPC channel — one `echo` in a dotfile breaks the handshake, which presents
+  as exactly the symptom above.
+- `codex-cli-launcher.cjs` must not gate signal forwarding on `child.killed`.
+  That flag records only that `kill()` was once called, so it makes every signal
+  after the first a no-op while Node's own default disposition stays suppressed —
+  leaving the launcher and a stuck `codex` killable only by `SIGKILL`.
+
 ## 11. CLI launchers belong to the unified profile
 
 Do not add a second management script or a second profiles directory. The engine

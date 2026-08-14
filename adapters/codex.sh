@@ -64,17 +64,26 @@ a_preflight() {
   fi
   local codex_bin="$src/Contents/Resources/codex"
   local node_bin="$src/Contents/Resources/cua_node/bin/node"
+  # Structural: without these two the launcher chain cannot be built at all.
   [[ -x "$codex_bin" ]] || { print "Missing bundled codex executable"; return 1 }
   [[ -x "$node_bin" ]] || { print "Missing bundled Node executable"; return 1 }
+  # Identity: only Browser Use depends on these, and the identifiers and Team ID
+  # below are pinned to what OpenAI ships today. If they rotate either, the clone
+  # itself is still fine and the chain may well still be accepted under the new
+  # identity — so warn rather than block the whole build on a stale constant.
+  local sig_ok=1
   codesign --verify --strict \
     -R='identifier "codex" and anchor apple generic and certificate leaf[subject.OU] = "2DC432GLL2"' \
-    "$codex_bin" 2>/dev/null ||
-    { print "Bundled codex executable no longer has the expected OpenAI signature"; return 1 }
+    "$codex_bin" 2>/dev/null || sig_ok=0
   codesign --verify --strict \
     -R='identifier "node" and anchor apple generic and certificate leaf[subject.OU] = "2DC432GLL2"' \
-    "$node_bin" 2>/dev/null ||
-    { print "Bundled Node executable no longer has the expected OpenAI signature"; return 1 }
-  print "   Browser Use signed launch chain ✓"
+    "$node_bin" 2>/dev/null || sig_ok=0
+  if (( sig_ok )); then
+    print "   Browser Use signed launch chain ✓"
+  else
+    print "   ⚠️  Bundled codex/Node no longer carry the expected OpenAI signature."
+    print "      The clone will still build; Browser Use may stop working (AGENTS.md §10)."
+  fi
 }
 
 # Codex's helper paths anchor to the framework name, so CFBundleName does not
@@ -139,7 +148,13 @@ a_sign_extra() {
   # Preserve the original Developer ID signature on Resources/codex. Browser Use
   # rejects the local pipe unless node_repl and both ancestors retain trusted
   # OpenAI identities; replacing this signature with ad-hoc breaks that chain.
-  codesign --verify --strict "$app/Contents/Resources/codex" >/dev/null 2>&1
+  #
+  # This assertion must stay explicit. a_sign_extra is called directly (not on the
+  # left of ||), so set -e is live inside it: a bare failing command here would
+  # abort the whole run with no message at all — and by this point step 2 has
+  # already deleted the previously working clone.
+  codesign --verify --strict "$app/Contents/Resources/codex" >/dev/null 2>&1 ||
+    die "Resources/codex lost its Developer ID signature during the copy — Browser Use would not authorize"
   for f in "$app/Contents/Resources/native/"*; do
     [[ -f "$f" ]] && codesign --force --sign - "$f" >/dev/null 2>&1
   done
