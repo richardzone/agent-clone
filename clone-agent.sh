@@ -178,19 +178,28 @@ Clone ${label}? [Y/n] "
     [[ -f "$PROFILE_DIR/${cand}.conf" ]] &&
       warn "  Note: profiles/${cand}.conf already exists and would be overwritten."
 
+    # Offer only what this machine can actually do, and default to it. Defaulting
+    # to `all` unconditionally meant that on a machine with just one of the two
+    # installed, the prompt rejected its own default — pressing Enter looped
+    # forever with no way out but Ctrl-C.
+    if (( has_app && has_cli )); then
+      tdefault="all"; tchoices="all, app, or cli"
+    elif (( has_app )); then
+      tdefault="app"; tchoices="app (CLI not installed)"
+    else
+      tdefault="cli"; tchoices="cli (desktop app not installed)"
+    fi
     while true; do
-      ask reply "  Target: all, app, or cli [all] "
-      ctarget="${${reply:-all}:l}"
-      if [[ "$ctarget" == all || "$ctarget" == app || "$ctarget" == cli ]]; then
-        if [[ "$ctarget" != cli && "$has_app" != 1 ]]; then
-          warn "  ${label} desktop app is not installed; choose cli."
-        elif [[ "$ctarget" != app && "$has_cli" != 1 ]]; then
-          warn "  ${label} CLI is not installed; choose app."
-        else
-          break
-        fi
-      else
+      ask reply "  Target: ${tchoices} [${tdefault}] "
+      ctarget="${${reply:-$tdefault}:l}"
+      if [[ "$ctarget" != all && "$ctarget" != app && "$ctarget" != cli ]]; then
         warn "  Choose all, app, or cli."
+      elif [[ "$ctarget" != cli ]] && (( ! has_app )); then
+        warn "  ${label}'s desktop app is not installed — only 'cli' is available here."
+      elif [[ "$ctarget" != app ]] && (( ! has_cli )); then
+        warn "  ${label}'s CLI is not installed — only 'app' is available here."
+      else
+        break
       fi
     done
 
