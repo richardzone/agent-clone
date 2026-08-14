@@ -1,7 +1,8 @@
 # Adapter interface contract
 
 `clone-app.sh` is a generic engine. It only knows the main line: copy the bundle →
-rewrite identity → patch the asar → install a wrapper → sign inside-out.
+rewrite identity → patch the asar → install a wrapper → sign inside-out → adapter
+post-install.
 **Everything app-specific lives in an adapter.**
 
 Supporting a new app means writing `<kind>.sh` in this directory and referring to
@@ -69,6 +70,10 @@ no-op for the ones you don't need:
 ```zsh
 a_notes() { :; }
 ```
+
+The engine verifies all seven exist right after sourcing the adapter, before
+anything is written, and names the missing one. `a_post_install` is the newest and
+is what an adapter written against the earlier six-hook contract will be missing.
 
 Call order (numbers refer to the engine's steps):
 
@@ -188,5 +193,5 @@ re-sign → **actually launch it and confirm the processes are healthy**. A run 
 completes without errors proves nothing; the verification checklist in
 [../AGENTS.md](../AGENTS.md) has ready-to-use commands.
 
-Once it works by hand, slot each step into one of the six functions above — that's
+Once it works by hand, slot each step into one of the seven functions above — that's
 your adapter.
