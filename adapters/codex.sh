@@ -53,29 +53,38 @@ a_preflight() {
     print "CODEX_HOME not found in app.asar — data isolation may no longer work"; return 1
   fi
   print "   CODEX_HOME support ✓"
+  # The clone's only working auto-update switch. If upstream drops it the clone
+  # would silently start checking again, so fail loudly here instead.
+  if ! strings -a "$src/Contents/Resources/app.asar" 2>/dev/null | grep -q 'CODEX_SPARKLE_ENABLED'; then
+    print "CODEX_SPARKLE_ENABLED not found in app.asar — the auto-update switch is gone"; return 1
+  fi
+  print "   CODEX_SPARKLE_ENABLED support ✓"
 }
 
 # Codex's helper paths anchor to the framework name, so CFBundleName does not
 # affect them and no renaming is required.
 a_rename_helpers() { print "   (Codex helpers anchor to the framework name; no renaming needed)"; }
 
-a_extra_plist() {
-  local plist="$1"
-  # Codex auto-updates via Sparkle. These two keys are absent from the original
-  # Info.plist (the feed is configured in code), so add them as false to disable
-  # automatic checks and installs — otherwise Sparkle would overwrite the clone
-  # with the official package and wipe every customisation.
-  /usr/libexec/PlistBuddy -c "Add :SUEnableAutomaticChecks bool false" "$plist" 2>/dev/null ||
-    /usr/libexec/PlistBuddy -c "Set :SUEnableAutomaticChecks false" "$plist"
-  /usr/libexec/PlistBuddy -c "Add :SUAutomaticallyUpdate bool false" "$plist" 2>/dev/null ||
-    /usr/libexec/PlistBuddy -c "Set :SUAutomaticallyUpdate false" "$plist"
-  print "   Sparkle auto-update disabled"
-}
+# Auto-update is disabled through the wrapper (CODEX_SPARKLE_ENABLED), not here.
+# Earlier versions wrote SUEnableAutomaticChecks/SUAutomaticallyUpdate into this
+# plist; that was measured to have no effect and has been removed — see AGENTS.md
+# "Sparkle reads NSUserDefaults before Info.plist".
+a_extra_plist() { :; }
 
 a_wrapper_env() {
   local name="$1"
   # Second isolation layer: login state, sessions and MCP config all live under CODEX_HOME
   print "export CODEX_HOME=\"${A_CODEX_HOME_TEMPLATE//<NAME>/$name}\""
+  # Kill the updater at the root. Codex gates Sparkle on this variable itself:
+  #   shouldIncludeSparkle(flavor, platform, env) =
+  #       env.CODEX_SPARKLE_ENABLED !== 'false' && <flavor is shipping> && platform === 'darwin'
+  # and the result feeds sparkleManager's enableUpdater, whose initializeUpdater()
+  # returns early when false — so no feed is fetched, no update is staged, and the
+  # header's update button never appears.
+  # This has to be an environment variable: the Info.plist route does not work
+  # (see AGENTS.md), and `defaults write` gets overwritten by Codex's own
+  # sparkle.node, which calls setAutomaticallyChecksForUpdates: on launch.
+  print "export CODEX_SPARKLE_ENABLED=false"
 }
 
 a_sign_extra() {
@@ -104,6 +113,10 @@ a_sign_extra() {
     [[ -f "$f" ]] && codesign --force --sign - "$f" >/dev/null 2>&1
   done
 }
+
+# Nothing to set up in the data directory: CODEX_HOME already isolates everything
+# that matters, and the updater is disabled via the wrapper environment.
+a_post_install() { :; }
 
 a_notes() {
   local name="$1"

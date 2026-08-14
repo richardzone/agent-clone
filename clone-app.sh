@@ -335,7 +335,8 @@ if (( DRY_RUN )); then
   info "  2. Rewrite the bundle identity (name / bundle ID / icon)"
   info "  3. Handle Electron helpers, patch the asar productName in place and sync the integrity hash"
   info "  4. Install the wrapper and re-sign ad-hoc, inside-out"
-  info "  5. Write ${PROFILE#$REPO_DIR/}"
+  info "  5. Run the adapter's data-directory setup under ${DATA_DIR}"
+  info "  6. Write ${PROFILE#$REPO_DIR/}"
   exit 0
 fi
 
@@ -448,6 +449,18 @@ codesign --force --sign - "$APP"  >/dev/null 2>&1
 
 codesign --verify --deep --strict "$APP" || die "Signature verification failed"
 info "Signature OK"
+
+# ===========================================================================
+step "Post-install: adapter setup inside the data directory"
+# ===========================================================================
+# Everything above writes inside the .app; this writes next to it, in the clone's
+# own data directory. That directory survives rebuilds by design (which is what
+# keeps logins and history), so this has to be idempotent — Claude uses it to drop
+# in the policy file that disables auto-updates.
+# DATA_DIR holds a literal $HOME so it can be written into the wrapper verbatim;
+# expand it here, where a real path is needed. A --data-dir given as an absolute
+# path contains no $HOME and is passed through untouched.
+a_post_install "$NAME" "${DATA_DIR/\$HOME/$HOME}"
 
 # ===========================================================================
 step "Refreshing Launch Services / icon cache"

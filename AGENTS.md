@@ -142,6 +142,109 @@ centers it. Two traps:
   only be reduced by scaling the content up overall, not eliminated. Default
   content ratio is 0.88; override with `ICON_CONTENT_RATIO`.
 
+## 10. Disabling auto-update: one mechanism per app, and neither is `Info.plist`
+
+**Symptom:** the clone keeps offering updates even though the adapter "disables"
+them.
+
+### Codex — Sparkle reads `NSUserDefaults` before `Info.plist`
+
+The adapter used to write `SUEnableAutomaticChecks=false` and
+`SUAutomaticallyUpdate=false` into the clone's `Info.plist`. **Measured: no
+effect.** Those keys are only Sparkle's *fallback*; the live values sit in the
+clone's own preference domain, and there they were `1`:
+
+```bash
+defaults read com.openai.codex.<clone> SUEnableAutomaticChecks   # 1, despite the plist saying false
+defaults read com.openai.codex.<clone> SULastCheckTime           # and still ticking
+```
+
+`defaults write` is not the fix either — Codex's own
+`Contents/Resources/native/sparkle.node` calls `setAutomaticallyChecksForUpdates:`
+on launch and puts it back. The working switch is Codex's own environment gate,
+injected by `a_wrapper_env`:
+
+```js
+The = e => e.CODEX_SPARKLE_ENABLED === 'false'
+y5  = (e,t,n,r) => !The(r) && v5.includes(e) && t === n     // shouldIncludeSparkle
+```
+
+It feeds `sparkleManager`'s `enableUpdater`, and `initializeUpdater()` returns
+early when false — the updater is never constructed, so nothing is fetched and the
+header's update button cannot appear.
+
+### Claude — the local policy tier, not the managed one
+
+Claude has an official `disableAutoUpdates` policy key (since 1.2581.0), resolved
+from two tiers. **Only one of them is usable here:**
+
+| Tier | Path | Per-clone? |
+|---|---|---|
+| managed | `/Library/Managed Preferences/com.anthropic.claudefordesktop.plist` | ❌ bundle ID is **hard-coded** — shared with the original |
+| local | `<userData>-3p/configLibrary/` | ✅ derived from `userData`, which `--user-data-dir` isolates |
+
+Deploying to the managed tier would stop the *original* updating too, which
+breaks the whole workflow (the original must update first — that is what `--all`
+rebuilds from). So `a_post_install` writes the local tier instead.
+
+The local tier is only consulted when the managed tier is absent or carries no
+non-app-behaviour keys (`fNe()` in the asar). With no MDM plist on the machine —
+the normal case — it is applied in full. If a machine *is* MDM-managed, that
+deployment wins and this stops working; that is the documented upstream
+precedence, not a bug to route around.
+
+## 11. Clones cannot actually be overwritten by an update — but they still download one
+
+Worth knowing before treating auto-update as an emergency. Measured on a Claude
+clone, hourly, for as long as it was left running:
+
+```
+[updater] Checking for updates
+[updater] Found an update, downloading
+[updater] Auto-update error: Could not locate update bundle for
+          com.anthropic.claudefordesktop.<clone> within .../ShipIt/update.XXXX/
+```
+
+ShipIt looks for a bundle matching the clone's bundle ID inside the downloaded
+package and finds only the official `com.anthropic.claudefordesktop`, so the swap
+never happens and the clone is left intact. **The cost is bandwidth, not
+breakage** — a full installer every hour, discarded every time.
+
+Do not read this as "auto-update is harmless, leave it on". It is still noise in
+the UI, it still wastes bandwidth, and it depends on a bundle-ID mismatch that
+upstream has no obligation to preserve.
+
+## 12. `~/.claude` is shared, deliberately — and splitting it is one-way
+
+Claude Desktop ships its own Claude Code and runs it out of the **data
+directory** — `<userData>/claude-code/<version>/claude.app` — so the binary is
+already per-clone. Its **configuration root is not**: the app resolves it as
+`CLAUDE_CONFIG_DIR ?? ~/.claude`, the same directory the original app and the
+`claude` CLI use. Settings, sessions, history and plugins are therefore shared.
+
+This is the one place where a version gap between clone and original has a real
+data surface — everything else (Electron `userData`, `CODEX_HOME`,
+`NSUserDefaults`, Claude's keychain entry) is isolated, so the two versions never
+read each other's state.
+
+**Leave it shared unless the user explicitly asks otherwise.** Sharing is normally
+what people want: one set of skills, plugins and settings across both apps. An
+earlier version of this adapter injected `CLAUDE_CONFIG_DIR=$HOME/.claude-<Name>`
+in `a_wrapper_env` and it was reverted, because the split is **one-way in
+practice**:
+
+- The moment the clone restarts, its Claude Code starts writing to the new
+  directory — `.claude.json`, `sessions/`, `projects/`, `tasks/`, `shell-snapshots/`.
+  In one measured case that was 57 MB within an hour.
+- Merging back is not a `cp`: `.claude.json` is a single global config that both
+  sides have since edited independently, so there is no conflict-free union.
+- Reverting the wrapper does **not** move that data back. The clone simply stops
+  seeing it.
+
+So this is a decision to confirm before acting on, not a default to apply. If it is
+wanted, say plainly that the split starts at the next launch and is not reversible
+by rebuilding.
+
 ---
 
 ## Adding an adapter for a new app
@@ -189,6 +292,43 @@ defaults read "/Applications/$NAME.app/Contents/Info" CFBundleIdentifier
 
 # 6. For Claude clones, confirm keychain isolation (expect two entries)
 security dump-keychain ~/Library/Keychains/login.keychain-db 2>/dev/null | grep '"svce"' | grep -i claude
+
+# 7. Auto-update is actually off — check the behaviour, not the setting
+#    Claude: expect "disabled by enterprise policy", and no "Checking for updates"
+grep -aE '\[updater\]|CCD-autoupdate' ~/Library/Logs/$NAME/main.log | tail -5
+#    Codex: SULastCheckTime must stop advancing. Note SUEnableAutomaticChecks stays
+#    1 — the wrapper's CODEX_SPARKLE_ENABLED stops the updater being constructed at
+#    all, so Sparkle never reads its own settings. Checking the setting proves nothing.
+defaults read com.openai.codex.<clone> SULastCheckTime
+
+# 8. The wrapper really carries the isolation variables into the process
+ps eww -p "$(pgrep -xf "/Applications/$NAME.app/Contents/MacOS/$NAME.*" | head -1)" |
+  tr ' ' '\n' | grep -E 'CLAUDE_CONFIG_DIR|CODEX_HOME|CODEX_SPARKLE_ENABLED'
+```
+
+⚠️ **`open` will not restart a clone that is still running** — it just activates
+the existing instance, and you will sit there wondering why a fresh setting had no
+effect. Claude in particular refuses to quit while it has live Claude Code sessions
+(`[updater-guard] restart deferred; N local session(s) still running`), so
+`pkill -TERM` and even `osascript … quit` can both come back "successful" with the
+process still up. Confirm it is gone before drawing conclusions:
+
+```bash
+ps aux | grep "[/]Applications/$NAME.app/Contents/MacOS/$NAME"
+```
+
+Since the engine's own `pkill` is subject to exactly the same refusal, a rebuild
+can leave the old process running against a bundle that has already been replaced.
+The bundle on disk is new; what is running is not. **Do not `kill -9` your way out
+of this on someone else's machine** — those sessions are real work. Ask, or wait.
+
+To verify a change without touching a running clone, launch a throwaway instance
+against a scratch data directory instead — it picks up its own policy file and logs
+to the same `~/Library/Logs/<Name>/main.log`, so the two are directly comparable:
+
+```bash
+CLAUDE_DESKTOP_BACKGROUND_LAUNCH=hidden \
+  "/Applications/$NAME.app/Contents/MacOS/$NAME" --user-data-dir=/tmp/scratch
 ```
 
 Do not count processes with something like `grep -oE 'Helper|...' | uniq -c` —
