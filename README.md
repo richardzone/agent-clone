@@ -77,7 +77,17 @@ so a collision is reported rather than acted on, but it still costs you a retry.
 Outside the app bundle — which is why rebuilding never loses logins or history:
 
 - `~/Library/Application Support/<Name>` — Electron data, for every clone
+- `~/Library/Application Support/<Name>-3p` — Claude only: the app's own policy
+  store, which is where auto-updates are switched off
 - `~/.codex-<Name>` — Codex only: login (`auth.json`), sessions, `config.toml`, MCP config
+
+One thing is **not** isolated: `~/.claude`. Claude Desktop runs its own bundled
+Claude Code, and that reads `~/.claude` — the same directory as the original app
+and the `claude` CLI — so settings, sessions, history and plugins are shared.
+Usually that is what you want (one set of skills and settings everywhere). If you
+do want them split, set `CLAUDE_CONFIG_DIR` in the clone's wrapper — but note it is
+effectively one-way: sessions written afterwards land in the new directory and
+cannot be merged back cleanly.
 
 Removing a clone for good means deleting its `.app`, its `profiles/<Name>.conf`, and
 those directories.
@@ -99,10 +109,9 @@ That said, a few consequences are worth knowing:
 - **Clones lose Apple's signature and notarization.** Modifying a bundle
   invalidates its signature, so the script re-signs ad-hoc (`codesign --sign -`).
   A clone is therefore no longer covered by full Gatekeeper validation.
-- **Clones receive no security updates.** Built-in auto-update has to be disabled
-  (it would overwrite the clone with the official package, wiping every change and
-  usually breaking it outright), so you rebuild by hand after each upstream
-  release — see below.
+- **Clones receive no security updates.** Cloning switches built-in auto-update
+  off — via each app's own supported mechanism, and only for the clone — so you
+  rebuild by hand after each upstream release. See below.
 - **Whether multi-account use fits each service's terms is yours to check.** This
   repo solves the technical isolation problem only; it grants no permission to use
   any service.
@@ -113,13 +122,23 @@ Not affiliated with Anthropic or OpenAI. Use at your own risk.
 
 ## Upstream updates require a manual rebuild
 
-**Clones do not auto-update, and must not be allowed to.**
+**Clones do not auto-update.** Both adapters now switch the updater off as part of
+cloning, each through that app's own supported mechanism, scoped to the clone:
 
-A clone's built-in updater (Squirrel for Claude, Sparkle for Codex) would
-download the official package and overwrite itself, discarding every
-customisation — and since the new package's signature and bundle name no longer
-match, it usually just crashes. The Codex adapter disables Sparkle's automatic
-checks explicitly; for Claude, **ignore any update prompt you see**.
+| | How it is disabled |
+|---|---|
+| Claude | the `disableAutoUpdates` policy key, written into the clone's own data directory (`<Name>-3p/configLibrary/`) |
+| Codex | `CODEX_SPARKLE_ENABLED=false` in the wrapper, the same gate Codex uses to build without Sparkle |
+
+Neither touches the original, and neither needs `sudo`. Note that `Info.plist` is
+*not* one of the working routes for either app — see [AGENTS.md](AGENTS.md) if you
+are tempted to add keys there.
+
+Left enabled, a clone would download a full installer on every check and then fail
+to apply it (the bundle ID inside the official package no longer matches, so the
+swap is refused). That failure is why clones survive at all today, but it is not a
+guarantee — the cost of leaving it on is wasted bandwidth and a nagging UI, and the
+protection is incidental.
 
 The correct sequence is: let the original app update normally, then run
 `./clone-app.sh --all`. The script is idempotent and safe to re-run at any time.
@@ -139,9 +158,9 @@ The substantive differences are isolated in `adapters/`:
 | Main executable | `Claude` | `ChatGPT` |
 | Helper location | `Contents/Frameworks/*.app`, path derived from `CFBundleName` | `Codex Framework.framework/Versions/<chromium>/Helpers/` |
 | Helpers need renaming | **Yes** — otherwise `Unable to find helper app` | No, paths anchor to the framework name |
-| Data isolation | `--user-data-dir` only | `--user-data-dir` **plus** `CODEX_HOME` |
+| Data isolation | `--user-data-dir` only (`~/.claude` stays shared) | `--user-data-dir` **plus** `CODEX_HOME` |
 | Keychain isolation | ✅ possible (via asar `productName`) | ❌ not possible (names compiled into native code) |
-| Auto-update | in-house Squirrel, no plist switch | Sparkle, disabled via `SUEnableAutomaticChecks` |
+| Auto-update | Squirrel, off via the `disableAutoUpdates` policy key | Sparkle, off via `CODEX_SPARKLE_ENABLED=false` |
 
 ### Codex keychain limitation
 
@@ -178,6 +197,7 @@ adapters/README.md                  adapter interface contract
 adapters/claude.sh                  Claude support
 adapters/codex.sh                   Codex support
 tools/patch-asar-productname.js     in-place productName rewrite inside app.asar
+tools/write-config-library.js       Claude's local-tier policy file (disables auto-update)
 tools/make-icon.sh                  png -> icns (crop, center, round, all sizes)
 icons/                              icon sources and generated .icns
 profiles/example.conf.sample        profile field reference
@@ -210,6 +230,11 @@ alias codex-work='CODEX_HOME=~/.codex-work codex'
 
 Log in on first run. Note that if `ANTHROPIC_API_KEY` is set, the Claude CLI
 bills per token and ignores your subscription.
+
+`CLAUDE_CONFIG_DIR` is worth knowing about for a second reason: Claude Desktop runs
+its own bundled Claude Code, which reads `~/.claude` exactly like the CLI does. By
+default a clone, the original app and the CLI therefore all share one Claude Code
+config — see [Where a clone's data lives](#where-a-clones-data-lives).
 
 ---
 

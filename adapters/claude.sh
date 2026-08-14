@@ -14,6 +14,24 @@ A_FRAMEWORK=""                                        # main framework name; emp
 # entry — full isolation.
 A_KEYCHAIN_ISOLATED=1
 
+# ⚠️ Claude Desktop's built-in Claude Code reads ~/.claude — the same directory as
+# the original app and the CLI, and --user-data-dir does not cover it. So Claude
+# Code's settings, sessions, history and plugins ARE shared between a clone and the
+# original. That is deliberate here, not an oversight: it is usually what you want,
+# since it keeps one set of skills, plugins and settings across both.
+# CLAUDE_CONFIG_DIR would split them (the app resolves the config root as
+# `CLAUDE_CONFIG_DIR ?? ~/.claude`), but injecting it is a one-way move — sessions
+# written afterwards land in the new directory and cannot be merged back cleanly.
+# Don't add it here without the user explicitly asking for split config.
+
+# Where the app looks for its local-tier policy file. Derived from userData, which
+# the engine isolates via --user-data-dir, so this is already per-clone:
+#   Lf() = CLAUDE_USER_DATA_DIR ? userData : userData + "-3p"
+# The managed tier is no use to us here — its path is the hard-coded bundle ID
+# /Library/Managed Preferences/com.anthropic.claudefordesktop.plist, shared with
+# the original, so a policy deployed there would stop the original updating too.
+A_POLICY_ROOT_SUFFIX="-3p"
+
 a_preflight() {
   local src="$1"
   local suffix
@@ -24,6 +42,12 @@ a_preflight() {
       { print "Missing helper 'Claude Helper${suffix}.app' — Electron helper naming may have changed"; return 1 }
   done
   print "   Helper naming ✓ (4 found)"
+  # The policy key a_post_install writes. If upstream renames or drops it the clone
+  # would silently resume hourly update downloads, so fail loudly here instead.
+  if ! strings -a "$src/Contents/Resources/app.asar" 2>/dev/null | grep -q 'disableAutoUpdates'; then
+    print "disableAutoUpdates not found in app.asar — the auto-update policy key is gone"; return 1
+  fi
+  print "   disableAutoUpdates policy key ✓"
 }
 
 a_rename_helpers() {
@@ -47,11 +71,12 @@ a_rename_helpers() {
   done
 }
 
-# Claude's updater is in-house with no plist switch to flip; the README tells users
-# to ignore update prompts instead.
+# Claude's updater has no Info.plist switch; it is disabled through the local-tier
+# policy file written by a_post_install instead.
 a_extra_plist() { :; }
 
 # Claude only needs the Electron-level isolation, so the wrapper gets no extra env.
+# Deliberately NOT setting CLAUDE_CONFIG_DIR — see the note at the top of this file.
 a_wrapper_env() { :; }
 
 a_sign_extra() {
@@ -66,4 +91,24 @@ a_sign_extra() {
   done
 }
 
-a_notes() { :; }
+a_post_install() {
+  local name="$1" data_dir="$2"
+  # Turn off auto-updates through the app's own policy key. Claude's updater has no
+  # Info.plist switch, but `disableAutoUpdates` (available since 1.2581.0) is read
+  # from the local tier, which lives under the clone's own data directory — so this
+  # stops the clone checking without touching the original.
+  # Without it the clone downloads a full installer every hour and fails to apply it
+  # ("Could not locate update bundle", the bundle ID no longer matches), which is
+  # harmless but pure wasted bandwidth.
+  node "$REPO_DIR/tools/write-config-library.js" \
+    "${data_dir}${A_POLICY_ROOT_SUFFIX}/configLibrary" '{"disableAutoUpdates":true}'
+}
+
+a_notes() {
+  local name="$1"
+  print ""
+  print "  Auto-updates are off via the clone's own policy file; rebuild with"
+  print "  ./clone-app.sh ${name} after the original updates."
+  print "  Note: Claude Code's config (~/.claude — settings, sessions, history,"
+  print "  plugins) is shared with the original app and the claude CLI."
+}

@@ -11,9 +11,12 @@ in the engine.
 Two implementations to copy from:
 
 - `claude.sh` — standard Electron layout (helpers under `Contents/Frameworks/`,
-  paths derived from `CFBundleName`)
+  paths derived from `CFBundleName`), plus the only `a_post_install` in the repo
 - `codex.sh` — Chromium-style layout (helpers inside the framework) plus an extra
-  environment-variable isolation layer
+  environment-variable isolation layer (`CODEX_HOME`)
+
+Both disable auto-update, from `a_wrapper_env` or `a_post_install` — never from
+`a_extra_plist`.
 
 ---
 
@@ -60,8 +63,8 @@ documentation:
 
 ## Functions
 
-**All six must be defined** — the engine calls them unconditionally. Write a no-op
-for the ones you don't need:
+**All seven must be defined** — the engine calls them unconditionally. Write a
+no-op for the ones you don't need:
 
 ```zsh
 a_notes() { :; }
@@ -76,6 +79,7 @@ Call order (numbers refer to the engine's steps):
 | 5/9 handle helpers | `a_rename_helpers` | clone app path, clone name |
 | 8/9 install wrapper | `a_wrapper_env` | clone name |
 | 9/9 re-sign (**before** the engine's generic loops) | `a_sign_extra` | clone app path |
+| Post-install, after the bundle is complete | `a_post_install` | clone name, **expanded** data dir |
 | After everything succeeds | `a_notes` | clone name |
 
 ### `a_preflight <src>`
@@ -109,12 +113,15 @@ Apps whose helpers anchor to a framework name (like Codex) need no renaming, but
 
 ### `a_extra_plist <plist>`
 
-Write adapter-specific keys into the clone's `Info.plist`. The typical use is
-disabling auto-update (`codex.sh` sets Sparkle's `SUEnableAutomaticChecks` and
-`SUAutomaticallyUpdate` to false here).
+Write adapter-specific keys into the clone's `Info.plist`.
 
 `CFBundleName`, `CFBundleDisplayName`, `CFBundleIdentifier`, `CFBundleIconFile`
 and `CFBundleIconName` are already handled by the engine; don't repeat them.
+
+⚠️ **Do not reach for this to disable auto-update.** Both adapters are no-ops
+here, and Codex is a no-op *because* the plist route was tried and measured not to
+work: Sparkle reads `NSUserDefaults` first and `Info.plist` only as a fallback.
+See AGENTS.md.
 
 ### `a_wrapper_env <name>`
 
@@ -143,6 +150,21 @@ Work **inside-out** here as well: deepest first, so the outer seals cover what i
 already signed. **Never sign with `codesign --deep`** — Apple deprecated it for
 signing and it mismatches nested helper signatures. `--deep` is for verification
 only.
+
+### `a_post_install <name> <data-dir>`
+
+The one hook that writes **outside the .app**, into the clone's data directory.
+Use it for state the app reads from disk rather than from its bundle — `claude.sh`
+drops in the local-tier policy file that turns auto-updates off.
+
+Two things follow from where that directory lives:
+
+- **It survives rebuilds** (by design — that is what preserves logins and
+  history), so this hook **must be idempotent**. Merge into what is already there;
+  never write a file wholesale, or you will discard configuration the user set up
+  through the app's own UI.
+- **The path is passed expanded.** `DATA_DIR` carries a literal `$HOME` so it can
+  go into the wrapper verbatim; the engine expands it before calling you.
 
 ### `a_notes <name>`
 
