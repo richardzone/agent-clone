@@ -14,7 +14,8 @@ in the engine.
 Two implementations to copy from:
 
 - `claude.sh` — standard Electron layout (helpers under `Contents/Frameworks/`,
-  paths derived from `CFBundleName`), plus the only `a_post_install` in the repo
+  paths derived from `CFBundleName`), plus the only `a_post_install` that does any
+  work — `codex.sh` defines the hook as a no-op
 - `codex.sh` — Chromium-style layout (helpers inside the framework) plus an extra
   environment-variable isolation layer (`CODEX_HOME`)
 
@@ -77,9 +78,10 @@ no-op for the ones you don't need:
 a_notes() { :; }
 ```
 
-The engine verifies all seven exist right after sourcing the adapter, before
-anything is written, and names the missing one. `a_post_install` is the newest and
-is what an adapter written against the earlier six-hook contract will be missing.
+The engine verifies all eleven exist right after sourcing the adapter, before
+anything is written, and names the missing one. The four `a_cli_*` hooks are the
+newest and are what an adapter written against the earlier seven-hook contract
+will be missing.
 
 Call order (numbers refer to the engine's steps):
 
@@ -111,10 +113,12 @@ what is missing — that is what tells the user which line of the adapter to fix
 *inside the function*. A failing command in there will **not** abort; execution
 continues to the end and returns the status of the last command.
 
-`a_cli_preflight` is called the same way (`a_cli_preflight || die ...`) and carries
-the same requirement.
+`a_cli_preflight` and `a_post_install` are called the same way
+(`a_cli_preflight || die ...`, `a_post_install ... || die ...`) and carry the same
+requirement. That is three hooks, not two — `a_post_install` is easy to miscount
+because it runs late, among the hooks that *are* protected.
 
-The other nine functions are called directly, so `set -e` applies normally: any
+The other eight functions are called directly, so `set -e` applies normally: any
 non-zero return inside them terminates the whole script — silently, since there is
 no `die` to print anything. Append `|| true` to commands that are expected to fail
 sometimes, and `|| die "..."` to ones whose failure actually matters. A bare
@@ -188,6 +192,15 @@ Two things follow from where that directory lives:
   through the app's own UI.
 - **The path is passed expanded.** `DATA_DIR` carries a literal `$HOME` so it can
   go into the wrapper verbatim; the engine expands it before calling you.
+
+⚠️ **You must `return 1` explicitly**, exactly as for `a_preflight`. The engine
+calls this as `a_post_install ... || die ...`, and being on the left of `||`
+disables `set -e` *inside the function* — a failing command in there does **not**
+abort, execution runs on to the end, and the hook returns the status of its last
+statement. Get this wrong and the engine prints `Done.` while `a_notes` announces
+that auto-updates are off, with no policy file on disk. That is the exact silent
+failure this hook exists to prevent, so end every fallible step with
+`|| return 1`.
 
 ### `a_notes <name>`
 

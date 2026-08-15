@@ -32,6 +32,16 @@ Or do it directly, substituting your own clone names and icons:
 open /Applications/MyClaude.app
 ```
 
+Those create **both** a desktop clone and a CLI launcher, so they need the vendor
+CLI (`claude` / `codex`) on `PATH` as well as the desktop app. If you only want the
+desktop clone, add `--target app`:
+
+```bash
+./clone-agent.sh MyClaude --app claude --icon ~/Pictures/my-claude.png --target app
+```
+
+`--init` works this out for you and only offers what is actually installed.
+
 **After each upstream release**, let the original app update itself first, then
 rebuild every clone:
 
@@ -93,7 +103,11 @@ Outside the app bundle — which is why rebuilding never loses logins or history
 - `~/Library/Application Support/<Name>-3p` — Claude only: the app's own policy
   store, which is where auto-updates are switched off
 - `~/.codex-<Name>` — Codex: login (`auth.json`), sessions, `config.toml`, MCP
-  config. Shared by that profile's desktop clone and its CLI launcher
+  config. Shared by that profile's desktop clone and its CLI launcher, with one
+  exception: the CLI launcher forces MCP OAuth tokens into this directory, while
+  the desktop clone still writes them to the shared `Codex MCP Credentials`
+  keychain entry. So an MCP server authorized from the desktop is not visible to
+  the launcher, and vice versa
 - `~/.claude-<Name>` — Claude **CLI launcher** only: the `CLAUDE_CONFIG_DIR` this
   tool generates, holding that profile's login, `settings.json` and MCP config
 

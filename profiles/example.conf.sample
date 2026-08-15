@@ -51,5 +51,5 @@ P_CLI_BIN_DIR='$HOME/.local/bin'
 
 # Source app version this profile was last built against. The engine warns when
 # the installed app has moved on, because some upstream invariants an adapter
-# depends on (see AGENTS.md §10) cannot be tested by preflight.
+# depends on (see AGENTS.md §13) cannot be tested by preflight.
 P_VERIFIED_SOURCE_VERSION='0.2026.8.5'

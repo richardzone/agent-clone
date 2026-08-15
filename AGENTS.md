@@ -415,9 +415,18 @@ grep -aE '\[updater\]|CCD-autoupdate' ~/Library/Logs/$NAME/main.log | tail -5
 #    all, so Sparkle never reads its own settings. Checking the setting proves nothing.
 defaults read com.openai.codex.<clone> SULastCheckTime
 
-# 8. The wrapper really carries the isolation variables into the process
+# 8. The wrapper really carries the isolation variables into the process.
+#    Expect per app: Codex → CODEX_HOME, CODEX_SPARKLE_ENABLED, CODEX_CLI_PATH.
+#    Claude → nothing here but the --user-data-dir argument; its wrapper only
+#    *unsets* CLAUDE_USER_DATA_DIR and deliberately never sets CLAUDE_CONFIG_DIR
+#    (section 12). A Claude clone matching nothing is correct, not a failure —
+#    check the argument instead.
 ps eww -p "$(pgrep -xf "/Applications/$NAME.app/Contents/MacOS/$NAME.*" | head -1)" |
-  tr ' ' '\n' | grep -E 'CLAUDE_CONFIG_DIR|CODEX_HOME|CODEX_SPARKLE_ENABLED'
+  tr ' ' '\n' | grep -E 'CODEX_HOME|CODEX_SPARKLE_ENABLED|CODEX_CLI_PATH|--user-data-dir'
+#    And that CLAUDE_USER_DATA_DIR really is absent, since inheriting it would
+#    silently re-enable Claude's auto-updates (section 10):
+ps eww -p "$(pgrep -xf "/Applications/$NAME.app/Contents/MacOS/$NAME.*" | head -1)" |
+  tr ' ' '\n' | grep -c 'CLAUDE_USER_DATA_DIR'      # Expect: 0
 
 # 9. Codex only: the Browser Use chain. codex must hang off the bundled node, not
 #    off the clone's ad-hoc-signed main binary, and all three must be OpenAI-signed.
@@ -432,7 +441,7 @@ For a CLI target, the launcher is the thing that has to be checked — a generat
 file that looks right can still resolve to the wrong account:
 
 ```bash
-NAME=MyCodex; CMD=codex-myscodex          # or whatever --list reports
+NAME=MyCodex; CMD=codex-mycodex          # or whatever --list reports
 
 # 1. Shape: -f shebang, marker on line 2, every unset BEFORE the first export
 sed -n '1,8p' "$(whence -p $CMD)"
