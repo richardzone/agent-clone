@@ -201,15 +201,29 @@ the normal case — it is applied in full. If a machine *is* MDM-managed, that
 deployment wins and this stops working; that is the documented upstream
 precedence, not a bug to route around.
 
-Two details that are easy to misread:
+Three details that are easy to misread:
 
-- The precedence is **replace, not merge**. If the managed plist happens to hold
-  *only* app-behaviour keys, the whole managed dict is discarded in favour of the
-  local tier — those keys are not merged on top of it.
-- The log line is `[updater] Auto-updates disabled by enterprise policy` (and
-  telemetry `reason: enterprise_policy`) **whichever tier supplied the value**. A
-  clone reporting "enterprise policy" is not evidence of MDM; the local file
-  produces exactly the same wording.
+- The precedence is **replace, not merge**, and it cuts both ways. If the managed
+  plist holds *only* app-behaviour keys, the whole managed dict is discarded in
+  favour of the local tier. But as soon as it holds **one** key that is not
+  app-behaviour-only — an egress allowlist, an MCP policy, anything — the local
+  tier is dropped wholesale instead, taking `disableAutoUpdates` with it. So *any*
+  MDM management of Claude re-enables updates in every clone on that machine, not
+  just an update-specific policy, and it takes effect whenever IT next changes an
+  unrelated setting. `a_post_install` warns when either managed path exists.
+- **Nothing is logged when the local tier is dropped.** The
+  `[updater] Auto-updates disabled by enterprise policy` line appears only when the
+  policy *is* applied; when it stops applying, the updater simply resumes.
+- That same log line appears **whichever tier supplied the value** (telemetry says
+  `reason: enterprise_policy` either way). A clone reporting "enterprise policy" is
+  not evidence of MDM; the local file produces exactly the same wording.
+
+There is also a third override path, beyond managed-vs-local: `bootstrapUrl` (with
+`bootstrapEnabled`, default true) makes the app fetch remote configuration at every
+launch, and its own description says those values "override local settings and
+become read-only". Nothing in this repo can prevent that — it is inherent to
+configuring a bootstrap URL at all — but do not describe the local tier as the last
+word without it.
 
 ## 11. Clones cannot actually be overwritten by an update — but they still download one
 
@@ -341,13 +355,29 @@ The bundle on disk is new; what is running is not. **Do not `kill -9` your way o
 of this on someone else's machine** — those sessions are real work. Ask, or wait.
 
 To verify a change without touching a running clone, launch a throwaway instance
-against a scratch data directory instead — it picks up its own policy file and logs
-to the same `~/Library/Logs/<Name>/main.log`, so the two are directly comparable:
+against a scratch data directory. It logs to the same `~/Library/Logs/<Name>/main.log`,
+so a run with and a run without the policy are directly comparable:
 
 ```bash
 CLAUDE_DESKTOP_BACKGROUND_LAUNCH=hidden \
   "/Applications/$NAME.app/Contents/MacOS/$NAME" --user-data-dir=/tmp/scratch
 ```
+
+⚠️ **Claude only, and it needs one setup step.** This runs the real binary, not the
+wrapper, and two things follow:
+
+- The policy root follows `--user-data-dir`, so you must place the policy file at
+  `/tmp/scratch-3p/configLibrary/` yourself (`tools/write-config-library.js` does
+  it) or the instance starts with no policy at all and you will "reproduce" a
+  failure you do not have.
+- **Never use this to check Codex.** Its switch is the wrapper's
+  `CODEX_SPARKLE_ENABLED`; bypassing the wrapper means Sparkle runs, `SULastCheckTime`
+  advances, and you conclude the fix failed when it did not. Verify Codex by
+  launching the clone normally.
+
+That difference is worth internalising: **Claude's protection is a file on disk and
+survives any launch path that keeps `--user-data-dir`; Codex's is an environment
+variable that exists only if the wrapper ran.**
 
 Do not count processes with something like `grep -oE 'Helper|...' | uniq -c` —
 the clone name appears more than once on the same `ps` line (executable path plus

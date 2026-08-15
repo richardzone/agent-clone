@@ -134,6 +134,14 @@ Neither touches the original, and neither needs `sudo`. Note that `Info.plist` i
 *not* one of the working routes for either app — see [AGENTS.md](AGENTS.md) if you
 are tempted to add keys there.
 
+**The two are not equally robust.** Claude's is a file in the clone's data
+directory, so it applies however the app is started. Codex's is an environment
+variable set by the wrapper, so it only applies when the wrapper runs — start
+`Contents/MacOS/<Name>` directly and Sparkle is live again. Launch Codex clones via
+the Dock, `open -a`, or the wrapper. On a Claude clone under MDM management, the
+managed configuration replaces the local one wholesale and the policy stops
+applying; the script warns when it detects that.
+
 Left enabled, a clone would download a full installer on every check and then fail
 to apply it (the bundle ID inside the official package no longer matches, so the
 swap is refused). That failure is why clones survive at all today, but it is not a

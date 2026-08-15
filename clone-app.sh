@@ -346,8 +346,12 @@ if (( DRY_RUN )); then
   info "  2. Rewrite the bundle identity (name / bundle ID / icon)"
   info "  3. Handle Electron helpers, patch the asar productName in place and sync the integrity hash"
   info "  4. Install the wrapper and re-sign ad-hoc, inside-out"
-  info "  5. Run the adapter's data-directory setup under ${DATA_DIR}"
-  info "  6. Write ${PROFILE#$REPO_DIR/}"
+  info "  5. Write ${PROFILE#$REPO_DIR/}"
+  # Show the expanded path: DATA_DIR still carries a literal $HOME here, and this is
+  # the one place a user checks where things will land before committing to a run.
+  # The adapter picks the exact subdirectory (Claude appends -3p, per its own Lf()),
+  # so name the base rather than implying this is the literal target.
+  info "  6. Run the adapter's data-directory setup, based on ${DATA_DIR//\$HOME/$HOME}"
   exit 0
 fi
 
@@ -462,31 +466,13 @@ codesign --verify --deep --strict "$APP" || die "Signature verification failed"
 info "Signature OK"
 
 # ===========================================================================
-step "Post-install: adapter setup inside the data directory"
-# ===========================================================================
-# Everything above writes inside the .app; this writes next to it, in the clone's
-# own data directory. That directory survives rebuilds by design (which is what
-# keeps logins and history), so this has to be idempotent — Claude uses it to drop
-# in the policy file that disables auto-updates.
-# DATA_DIR holds a literal $HOME so it can be written into the wrapper verbatim;
-# expand it here, where a real path is needed. A --data-dir given as an absolute
-# path contains no $HOME and is passed through untouched. Global replace (//), so a
-# hand-edited profile with $HOME appearing more than once still resolves fully.
-# On failure, die rather than letting set -e drop out silently: the bundle is
-# already installed and signed at this point, so an unexplained abort would leave a
-# clone that looks finished but never got its adapter setup.
-a_post_install "$NAME" "${DATA_DIR//\$HOME/$HOME}" ||
-  die "Adapter post-install failed (see above).\n   ${APP} is installed and signed, but its data-directory setup did not complete —\n   re-run ./clone-app.sh ${NAME} once the cause is fixed."
-
-# ===========================================================================
-step "Refreshing Launch Services / icon cache"
-# ===========================================================================
-"/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister" -f "$APP"
-killall Dock 2>/dev/null || true
-
-# ===========================================================================
 # Save the profile so later rebuilds are just ./clone-app.sh <Name>
 # ===========================================================================
+# Written before the post-install step, not after: every parameter it records is
+# already settled, and if post-install fails, the recovery advice is to re-run
+# `./clone-app.sh <Name>` — which only works if the profile exists. Writing it
+# afterwards meant a first run that failed here sent the user to a command that
+# demanded --app and --icon all over again.
 mkdir -p "$PROFILE_DIR"
 icon_store="$ICON"
 [[ "$icon_store" == "$REPO_DIR/"* ]] && icon_store="${icon_store#$REPO_DIR/}"
@@ -503,6 +489,29 @@ icon_store="$ICON"
   print "P_SOURCE=${(qq)SRC}"
   print "P_DEST_DIR=${(qq)DEST_DIR}"
 } > "$PROFILE"
+
+# ===========================================================================
+step "Post-install: adapter setup inside the data directory"
+# ===========================================================================
+# Everything above writes inside the .app; this writes next to it, in the clone's
+# own data directory. That directory survives rebuilds by design (which is what
+# keeps logins and history), so this has to be idempotent — Claude uses it to drop
+# in the policy file that disables auto-updates.
+# DATA_DIR holds a literal $HOME so it can be written into the wrapper verbatim;
+# expand it here, where a real path is needed. A --data-dir given as an absolute
+# path contains no $HOME and is passed through untouched. Global replace (//), so a
+# hand-edited profile with $HOME appearing more than once still resolves fully.
+# On failure, die rather than letting set -e drop out silently: the bundle is
+# already installed and signed at this point, so an unexplained abort would leave a
+# clone that looks finished but never got its adapter setup.
+a_post_install "$NAME" "${DATA_DIR//\$HOME/$HOME}" ||
+  die "Adapter post-install failed (see above).\n   ${APP} is already installed and signed, and right now it has NOT had its\n   adapter setup applied — for Claude that means auto-update is still live.\n   Do not launch it until this is fixed, then re-run: ./clone-app.sh ${NAME}"
+
+# ===========================================================================
+step "Refreshing Launch Services / icon cache"
+# ===========================================================================
+"/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister" -f "$APP"
+killall Dock 2>/dev/null || true
 
 print -P "\n%F{green}Done.%f"
 info "App      : $APP"

@@ -49,13 +49,17 @@ a_preflight() {
   print "   Helpers inside the framework ✓ ($(ls "$fwdir/Helpers" | grep -c '\.app$') .app bundles)"
   # CODEX_HOME support is what makes data isolation possible; without it the clone
   # would share ~/.codex with the original.
-  if ! strings -a "$src/Contents/Resources/app.asar" 2>/dev/null | grep -q 'CODEX_HOME'; then
+  # grep -qa reads the asar directly instead of piping through `strings`: one less
+  # dependency (a missing `strings` would otherwise be reported as an upstream
+  # change that never happened) and much faster, since grep stops at the first match.
+  local asar="$src/Contents/Resources/app.asar"
+  if ! grep -qa 'CODEX_HOME' "$asar"; then
     print "CODEX_HOME not found in app.asar — data isolation may no longer work"; return 1
   fi
   print "   CODEX_HOME support ✓"
   # The clone's only working auto-update switch. If upstream drops it the clone
   # would silently start checking again, so fail loudly here instead.
-  if ! strings -a "$src/Contents/Resources/app.asar" 2>/dev/null | grep -q 'CODEX_SPARKLE_ENABLED'; then
+  if ! grep -qa 'CODEX_SPARKLE_ENABLED' "$asar"; then
     print "CODEX_SPARKLE_ENABLED not found in app.asar — the auto-update switch is gone"; return 1
   fi
   print "   CODEX_SPARKLE_ENABLED support ✓"
@@ -121,6 +125,10 @@ a_post_install() { :; }
 a_notes() {
   local name="$1"
   print ""
+  print "  Launch this clone through its wrapper — open -a ${name}, the Dock, or"
+  print "  Contents/MacOS/ChatGPT. Running Contents/MacOS/${name} directly skips the"
+  print "  wrapper, and with it CODEX_SPARKLE_ENABLED, so Sparkle starts and can"
+  print "  replace the clone with the official package."
   print "  Note: Codex's keychain service names (Codex Safe Storage / Storage Key /"
   print "  MCP Credentials) are compiled into native code and unaffected by productName,"
   print "  so the clone shares those entries with the original."
