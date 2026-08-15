@@ -268,7 +268,13 @@ unset _hook
 
 : ${SRC:="$A_SOURCE_DEFAULT"}
 : ${DEST_DIR:="/Applications"}
-: ${BUNDLE_ID:="${A_BUNDLE_ID_BASE}.${${(L)NAME}//[^a-z0-9]/}"}
+# Replace the disallowed characters rather than deleting them. Deleting collapsed
+# every separator, so My-Claude, My_Claude and My.Claude all derived the same
+# identifier as MyClaude — different apps claiming one identity, and macOS keys TCC
+# permissions, the NSUserDefaults domain, Launch Services and the update-staging
+# directory off exactly that. A hyphen is valid in a bundle identifier.
+# Existing clones are unaffected: their profile stores P_BUNDLE_ID and it wins.
+: ${BUNDLE_ID:="${A_BUNDLE_ID_BASE}.${${(L)NAME}//[^a-z0-9]/-}"}
 # Note the literal $HOME: this string is written into the wrapper and expanded
 # there at runtime.
 : ${DATA_DIR:="\$HOME/Library/Application Support/${NAME}"}
@@ -279,6 +285,22 @@ APP="$DEST_DIR/${NAME}.app"
   die "Source app not found: $SRC\n   ${A_LABEL} may not be installed, or lives elsewhere — install it and retry, or pass --source with the real path."
 [[ "${APP:A}" != "${SRC:A}" ]] || die "Clone path equals the source app; that would overwrite the original"
 [[ -n "$ICON" ]] || die "First run needs --icon (.icns or .png)"
+
+# Preserving separators narrows the collisions but does not eliminate them —
+# My-Claude and My_Claude still both normalise to my-claude, and --bundle-id can be
+# pointed anywhere. Two clones sharing an identifier is not a cosmetic clash: macOS
+# keys TCC permissions, the preferences domain, Launch Services registration and the
+# updater's staging directory off it, so they stop being independent instances,
+# which is the whole point of this tool. Check the other profiles and refuse.
+# Sourcing happens in a subshell so the other profile's P_* cannot clobber ours.
+for _p in "$PROFILE_DIR"/*.conf; do
+  [[ "$_p" == "$PROFILE" ]] && continue
+  _other_id="$(unset P_BUNDLE_ID; source "$_p" 2>/dev/null; print -r -- "${P_BUNDLE_ID:-}")"
+  if [[ -n "$_other_id" && "$_other_id" == "$BUNDLE_ID" ]]; then
+    die "Bundle ID '${BUNDLE_ID}' is already claimed by the clone '${${_p:t}:r}'.\n   Two clones sharing one identifier would share macOS permissions, preferences\n   and update state. Pick a different name, or pass --bundle-id explicitly."
+  fi
+done
+unset _p _other_id
 
 # Step 2 rebuilds the clone with `rm -rf "$APP"`, so refuse to touch anything that
 # isn't ours: a slip like `./clone-app.sh Slack --app claude` would otherwise delete
