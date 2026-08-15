@@ -9,6 +9,11 @@ Notes for whoever maintains this repository next — human or AI.
 Every item below corresponds to a real failure. Read them before changing
 anything under `clone-agent.sh`, `adapters/`, or `tools/`.
 
+> **Read section 15 before you run anything.** The rest of this file is about
+> writing correct code; section 15 is about not destroying the maintainer's live
+> apps and logins while you test it. It is the one rule here whose cost is
+> unrecoverable rather than a wasted rebuild.
+
 ---
 
 ## 1. Never unpack and repack the asar
@@ -358,6 +363,62 @@ Profile names must also be unique **case-insensitively**. macOS filesystems are
 case-insensitive by default, and the bundle ID and default CLI command both
 lowercase the name — so `Work` and `WORK` would share one profile file, one
 launcher and one data directory.
+
+## 15. Never test against the maintainer's real apps or clones
+
+**This repository's test subjects are live accounts.** Everything this tool builds
+is something someone is signed into, and the engine's normal path includes
+`pkill -f "$APP"` and `rm -rf "$APP"`. A test run against a real profile is not a
+test — it is a rebuild of a thing in use, and if the app was mid-session when it
+was killed, the loss is not recoverable from this repo.
+
+Treat all four of these as off-limits by default, and do not rely on
+`--dry-run` to make them safe — a dry run still exercises argument handling
+against real paths, and one wrong flag is a real run:
+
+| Never touch | Why |
+|---|---|
+| `/Applications/Claude.app`, `/Applications/ChatGPT.app` | the **originals**. They are the source of every clone; corrupting one costs a reinstall and takes every clone's rebuild path with it |
+| Any clone under `/Applications` (`RichardClaude.app`, `RichardCodex.app`, …) | signed-in instances, usually running |
+| `~/.claude`, `~/.codex` | the originals' CLI/agent state |
+| `~/.claude-*`, `~/.codex-*`, `~/Library/Application Support/<clone>`, `<clone>-3p` | per-profile logins, sessions, history, MCP OAuth and policy files |
+| `profiles/*.conf` | not test fixtures. They are the only record of how a live clone was built |
+
+Do not run `clone-agent.sh` with a real profile name, and do not run `--all` or
+`--init` anywhere that can reach the real `profiles/` directory — `--all` walks
+every profile the maintainer has.
+
+**Test like this instead:** copy the repo to a temporary directory, point `HOME`
+at a sandbox directory, and use invented profile names. Everything in this repo is
+`$HOME`-relative or `--dest-dir`-relative, so a sandboxed `HOME` plus a temp
+`--dest-dir` is enough to exercise the whole engine, including the app path,
+without a single real path in play.
+
+**If the maintainer explicitly asks for a real profile to be used** — the only
+thing that lifts this — it is still worth being careful, because their permission
+covers the goal, not the collateral:
+
+- Snapshot first: profile file checksum, data-directory mode, `auth.json` size and
+  mtime, session count. Compare afterwards and say plainly that they match.
+- Copy the profile into your working checkout rather than reading and rewriting
+  the real `profiles/<Name>.conf`, so the record of their setup is never the thing
+  under test.
+- Prefer the narrowest target. `--target app` never touches the agent home at all;
+  `all` would `mkdir` and `chmod` a directory holding a live credential file.
+- Ask before killing anything. The engine's `pkill` is silent and immediate, and a
+  desktop agent may be mid-session.
+
+## 16. Do not change the working tree's git state while others are reading it
+
+A reviewer switched this worktree's branch mid-review. The commits were already
+pushed so nothing was lost, but a whole round of verification had silently run
+against the base revision instead of the branch under test, and every "not
+reproduced" in it was a false negative.
+
+If you need a different revision, use `git worktree add` or copy the repo
+elsewhere. Read history with `git show` and `git diff`, which need no checkout. In
+a shared or agent-driven checkout, treat `checkout`, `switch`, `reset`, `stash`,
+`merge` and `rebase` as writes to someone else's working state.
 
 ---
 
