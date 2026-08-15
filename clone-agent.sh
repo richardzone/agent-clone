@@ -103,7 +103,8 @@ while (( $# )); do
       print "Configured profiles:"
       for p in $profiles; do
         unset P_APP P_TARGET; source "$p"
-        printf "  %-22s %-9s %s\n" "${${p:t}:r}" "${${P_APP:-claude}:l}" "${${P_TARGET:-all}:l}"
+        # Same default as the build path: a profile with no P_TARGET is app-only.
+        printf "  %-22s %-9s %s\n" "${${p:t}:r}" "${${P_APP:-claude}:l}" "${${P_TARGET:-app}:l}"
       done
       exit 0 ;;
     --app)       need_val "$@"; APP_KIND="${2:l}"; shift 2 ;;   # :l lowercases, so --app Codex works
@@ -134,7 +135,7 @@ if (( DO_INIT )); then
   # --init collects only name/app/target/icon and hands off to the normal path; the other
   # options would not be passed along, so reject them rather than ignore them.
   [[ -z "$APP_KIND$TARGET$ICON$BUNDLE_ID$DATA_DIR$SRC$DEST_DIR$CLI_NAME$CLI_BIN_DIR" ]] && (( ! FORCE )) ||
-    die "--init takes no other options (except --dry-run).\n   For precise control use: ./clone-agent.sh <Name> --app <kind> --target <target> [options...]"
+    die "--init takes no other options (--dry-run is the only one it accepts; --force included).\n   For precise control use: ./clone-agent.sh <Name> --app <kind> --target <target> [options...]"
   [[ -t 0 ]] ||
     die "--init needs an interactive terminal. In scripts use: ./clone-agent.sh <Name> --app <kind> --target <target> [options...]"
 
@@ -152,7 +153,9 @@ if (( DO_INIT )); then
   for n in {1..${#i_kind}}; do
     has_app=0 has_cli=0
     [[ -d "${i_src[$n]}" ]] && has_app=1
-    command -v "${i_cli[$n]}" >/dev/null 2>&1 && has_cli=1
+    # whence -p, matching preflight: command -v would count a same-named shell
+    # function as an installed CLI, then preflight would reject it.
+    whence -p "${i_cli[$n]}" >/dev/null 2>&1 && has_cli=1
     printf "  %-8s app:%-3s  cli:%-3s\n" "${i_kind[$n]}" "$([[ $has_app == 1 ]] && print yes || print no)" "$([[ $has_cli == 1 ]] && print yes || print no)"
     if (( has_app || has_cli )); then
       can_kind+=("${i_kind[$n]}"); can_label+=("${i_label[$n]}")
@@ -269,7 +272,21 @@ if (( DO_ALL )); then
   pass=()
   (( DRY_RUN )) && pass=(--dry-run)
   print -P "%F{cyan}Rebuilding ${#profiles} profile(s)%f"
-  for p in $profiles; do "$SELF" "${${p:t}:r}" $pass; done
+  # Do not let one bad profile hide the rest. This loop used to run under set -e,
+  # so the first failure aborted the batch: profiles later in glob order were
+  # never attempted and nothing said so — on a tool whose whole safety story is
+  # "re-run --all after every upstream release, because clones cannot
+  # auto-update". Collect failures, keep going, and report at the end.
+  failed=()
+  for p in $profiles; do
+    "$SELF" "${${p:t}:r}" $pass || failed+=("${${p:t}:r}")
+  done
+  if (( ${#failed} )); then
+    print -P "\n%F{red}${#failed} of ${#profiles} profile(s) failed:%f"
+    for f in $failed; do print "   $f    (retry with ./clone-agent.sh $f)"; done
+    print "The others were rebuilt."
+    exit 1
+  fi
   if (( DRY_RUN )); then
     print -P "\n%F{yellow}--dry-run: all of the above was a preview; nothing was changed.%f"
   else
@@ -301,7 +318,12 @@ PROFILE="$PROFILE_DIR/${NAME}.conf"
 if [[ -f "$PROFILE" ]]; then
   source "$PROFILE"
   [[ -n "$APP_KIND"  ]] || APP_KIND="${${P_APP:-claude}:l}"
-  [[ -n "$TARGET"    ]] || TARGET="${${P_TARGET:-all}:l}"
+  # A profile written before CLI support has no P_TARGET and only ever managed an
+  # app. Resolving it to `all` would make the next --all install a launcher the
+  # user never asked for, and fail outright if the vendor CLI is not installed —
+  # turning the documented post-upgrade rebuild into a hard error. Existing
+  # profiles stay app-only until their owner opts in with --target all.
+  [[ -n "$TARGET"    ]] || TARGET="${${P_TARGET:-app}:l}"
   [[ -n "$ICON"      ]] || ICON="$P_ICON"
   [[ -n "$BUNDLE_ID" ]] || BUNDLE_ID="$P_BUNDLE_ID"
   [[ -n "$DATA_DIR"  ]] || DATA_DIR="$P_DATA_DIR"
@@ -350,7 +372,7 @@ CLI_BIN_REAL="$(expand_home_path "$CLI_BIN_DIR")"
 # touch — it would silently create a directory named '~' relative to wherever the
 # script was run from, install the launcher there, and store that in the profile.
 # Only $HOME-prefixed and absolute paths are portable, so require one.
-[[ "$CLI_BIN_REAL" == /* ]] ||
+(( ! TARGET_CLI )) || [[ "$CLI_BIN_REAL" == /* ]] ||
   die "--cli-bin-dir must be absolute or start with a literal \$HOME (got '$CLI_BIN_DIR').\n   A quoted '~/bin' is not expanded; use '\$HOME/bin' or the full path."
 CLI_LAUNCHER="$CLI_BIN_REAL/$CLI_NAME"
 # Line 2 of every generated launcher. Machine-readable on purpose: the overwrite
@@ -465,13 +487,20 @@ if (( TARGET_CLI )); then
   # had a provenance guard from the start (step 2 below); the launcher path had
   # none, so a --cli-name collision would destroy a vendor CLI, an unrelated tool
   # in the same directory, or another profile's launcher — and report success.
-  if [[ -e "$CLI_LAUNCHER" ]] && (( ! FORCE )); then
-    if [[ "$(head -c 512 "$CLI_LAUNCHER" 2>/dev/null | sed -n 2p)" != "$CLI_MARKER" ]]; then
-      linknote=""
-      [[ -L "$CLI_LAUNCHER" ]] &&
-        linknote="\n   It is a symlink: writing would clobber $(readlink "$CLI_LAUNCHER"), not the link."
-      die "$CLI_LAUNCHER exists and was not generated for profile '${NAME}'.${linknote}\n   Pick another --cli-name, remove that file yourself, or pass --force."
-    fi
+  #
+  # Test -L before -e, and separately: -e follows the link, so it is FALSE for a
+  # dangling symlink — which is the dangerous case, because the redirection at
+  # the end still follows it and creates the target, anywhere on the filesystem.
+  if (( ! FORCE )) && [[ -L "$CLI_LAUNCHER" ]]; then
+    die "$CLI_LAUNCHER is a symlink to $(readlink "$CLI_LAUNCHER").\n   Writing the launcher would follow it and clobber that path instead. Remove the symlink, pick another --cli-name, or pass --force."
+  fi
+  if (( ! FORCE )) && [[ -e "$CLI_LAUNCHER" ]]; then
+    # Only a regular file can carry our marker. Reading a FIFO here would block
+    # the engine forever, including under --dry-run.
+    [[ -f "$CLI_LAUNCHER" ]] ||
+      die "$CLI_LAUNCHER exists and is not a regular file.\n   Pick another --cli-name, remove it yourself, or pass --force."
+    [[ "$(head -c 512 "$CLI_LAUNCHER" 2>/dev/null | sed -n 2p)" == "$CLI_MARKER" ]] ||
+      die "$CLI_LAUNCHER exists and was not generated for profile '${NAME}'.\n   Pick another --cli-name, remove that file yourself, or pass --force."
   fi
   a_cli_preflight || die "CLI preflight failed"
   case ":$PATH:" in
@@ -633,11 +662,15 @@ if (( TARGET_CLI )); then
   mkdir -p "$CLI_BIN_REAL"
   mkdir -p "$CLI_HOME_REAL"
   chmod 700 "$CLI_HOME_REAL"
+  # Create the launcher already-private rather than fixing it up afterwards: a
+  # plain redirection would leave it world-readable between the write and the
+  # chmod.
+  : > "$CLI_LAUNCHER"
+  chmod 700 "$CLI_LAUNCHER"
   {
     # -f (NO_RCS): a non-interactive zsh still sources ~/.zshenv, which would let
     # a dotfile banner corrupt piped output and let a function named after the
-    # vendor command shadow the exec below. Safe here only because the exec line
-    # carries an absolute path and needs nothing from PATH.
+    # vendor command shadow the exec below.
     print '#!/bin/zsh -f'
     print "$CLI_MARKER"
     print "# Regenerate with ./clone-agent.sh ${NAME}"
@@ -648,8 +681,22 @@ if (( TARGET_CLI )); then
     # Order is load-bearing: the adapter's exports live inside these namespaces.
     for ns in $A_CLI_ENV_NAMESPACES; do print "unset -m ${(qq)ns}"; done
     a_cli_wrapper_env "$NAME"
-    a_cli_exec "$CLI_COMMAND_PATH"
-  } > "$CLI_LAUNCHER"
+    # Pin the vendor binary resolved at preflight, but keep working if a runtime
+    # manager moves it out from under us on the next upgrade. Without the
+    # fallback the launcher dies with a raw ENOENT even when a perfectly good
+    # vendor CLI is first on PATH; with it, the user gets told to re-pin.
+    # ${(qq)} takes a *variable*, never a literal — quoting a literal here silently
+    # mangles it. Build the messages first, then quote those.
+    cli_gone_msg="clone-agent: ${A_CLI_COMMAND} not found. Re-run ./clone-agent.sh ${NAME}"
+    print -r -- "agent_cli=${(qq)CLI_COMMAND_PATH}"
+    print -r -- 'if [[ ! -x $agent_cli ]]; then'
+    print -r -- "  agent_cli=\"\$(whence -p ${(qq)A_CLI_COMMAND} 2>/dev/null)\""
+    print -r -- "  [[ -n \$agent_cli ]] || { print -u2 ${(qq)cli_gone_msg}; exit 127 }"
+    # Double-quoted in the generated file so $agent_cli expands there, not here.
+    print -r -- "  print -u2 \"clone-agent: pinned path moved; using \$agent_cli. Re-run ./clone-agent.sh ${NAME} to re-pin.\""
+    print -r -- 'fi'
+    a_cli_exec
+  } >> "$CLI_LAUNCHER"
   chmod 700 "$CLI_LAUNCHER"
 fi
 

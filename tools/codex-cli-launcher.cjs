@@ -39,7 +39,10 @@ for (const signal of ['SIGINT', 'SIGHUP', 'SIGTERM']) {
     } catch {
       // Already gone; the exit handler will propagate.
     }
-    // If it does not go down on its own, stop wedging the parent.
+    // Escalate only for shutdown signals. SIGINT often means "cancel the current
+    // turn, keep the session" to a TUI, and hard-killing it five seconds later
+    // would destroy work the user was only trying to interrupt.
+    if (signal === 'SIGINT') return;
     setTimeout(() => {
       if (!childAlive) return;
       try {

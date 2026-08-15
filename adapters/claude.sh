@@ -12,8 +12,12 @@ A_CLI_COMMAND="claude"
 A_CLI_HOME_TEMPLATE='$HOME/.claude-<NAME>'
 # Namespaces the generated launcher clears before setting anything. Deliberately
 # CLAUDE_* rather than CLAUDE_CODE_*: the identity-relevant variables are spread
-# across both (CLAUDE_SECURESTORAGE_CONFIG_DIR is in the wider one, and setting it
-# empty re-points the profile at the default account's keychain entry).
+# across both. CLAUDE_SECURESTORAGE_CONFIG_DIR is the reason it matters — Claude
+# Code suffixes its keychain service name with a hash of the secure-storage
+# directory, and falls back to CLAUDE_CONFIG_DIR only while that variable is
+# *undefined*. An ambient empty value drops the suffix entirely and re-points the
+# profile at the default account's entry, so clearing it is what preserves
+# per-profile keychain isolation; nothing needs to re-set it afterwards.
 A_CLI_ENV_NAMESPACES=('ANTHROPIC_*' 'CLAUDE_*')
 
 # Claude's keychain service name derives from productName in the asar's
@@ -72,7 +76,9 @@ a_cli_wrapper_env() {
   print "export CLAUDE_CONFIG_DIR=\"${A_CLI_HOME_TEMPLATE//<NAME>/$name}\""
 }
 
-a_cli_exec() { print "exec ${(qq)1} \"\$@\""; }
+# $agent_cli is resolved by the engine on the lines just above this one: the path
+# pinned at preflight, or a PATH lookup if a runtime manager has since moved it.
+a_cli_exec() { print 'exec "$agent_cli" "$@"'; }
 
 a_sign_extra() {
   local app="$1" h f

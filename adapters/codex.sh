@@ -118,20 +118,33 @@ a_wrapper_env() {
 
 # codex silently ignores an unknown -c key but rejects an invalid *value* for a
 # known one, naming the key in the error. So a deliberately-bogus value is a
-# canary: if the key is ever renamed upstream, the two overrides below would stop
+# canary: if a key is ever renamed upstream, the two overrides below would stop
 # applying with no symptom at all, and MCP OAuth credentials would quietly revert
 # to the shared Keychain entry that README.md documents as un-isolatable.
+#
+# This warns rather than aborting, for the same reason the signature assertions in
+# a_preflight do: it is pinned to today's error phrasing, and a clone that still
+# builds is better than one blocked by a constant that drifted. It also has to
+# tell "codex ran and did not name the key" apart from "codex did not run at all",
+# or every unrelated codex failure gets reported as an upstream rename.
 a_cli_preflight() {
-  local key out
+  local key out rc tmp
+  tmp="$(mktemp -d)" || { print "   ⚠️  Could not create a temp dir; skipped the credential-store check."; return 0 }
   for key in cli_auth_credentials_store mcp_oauth_credentials_store; do
-    out="$(CODEX_HOME="$(mktemp -d)" codex -c "${key}=\"__canary__\"" login status 2>&1 || true)"
-    if [[ "$out" != *"$key"* ]]; then
-      print "codex no longer rejects a bogus value for '${key}' — the credential-store"
-      print "override may have been renamed upstream, which would silently fall back to"
-      print "the shared Keychain. Check the config reference before relying on isolation."
-      return 1
+    out="$(CODEX_HOME="$tmp" codex -c "${key}=\"__canary__\"" login status 2>&1)"; rc=$?
+    if (( rc == 0 )); then
+      print "   ⚠️  codex accepted a bogus value for '${key}'. That key may have been renamed"
+      print "      upstream, in which case credentials silently fall back to the shared Keychain."
+    elif [[ "$out" != *"$key"* ]]; then
+      print "   ⚠️  Could not check '${key}': codex exited ${rc} without naming it."
+      print "      This is usually an unrelated codex problem, not a renamed key."
+    else
+      continue
     fi
+    rm -rf "$tmp"
+    return 0
   done
+  rm -rf "$tmp"
   print "   Credential-store overrides still recognised ✓"
 }
 
@@ -142,8 +155,10 @@ a_cli_wrapper_env() {
 
 # Keep both account auth and MCP OAuth credentials in the profile-specific
 # CODEX_HOME instead of allowing a shared macOS Keychain entry.
+# $agent_cli is resolved by the engine on the lines just above this one: the path
+# pinned at preflight, or a PATH lookup if a runtime manager has since moved it.
 a_cli_exec() {
-  print "exec ${(qq)1} -c 'cli_auth_credentials_store=\"file\"' -c 'mcp_oauth_credentials_store=\"file\"' \"\$@\""
+  print 'exec "$agent_cli" -c '\''cli_auth_credentials_store="file"'\'' -c '\''mcp_oauth_credentials_store="file"'\'' "$@"'
 }
 
 a_sign_extra() {

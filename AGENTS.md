@@ -271,6 +271,38 @@ defaults read "/Applications/$NAME.app/Contents/Info" CFBundleIdentifier
 
 # 6. For Claude clones, confirm keychain isolation (expect two entries)
 security dump-keychain ~/Library/Keychains/login.keychain-db 2>/dev/null | grep '"svce"' | grep -i claude
+
+# 7. Codex only: the Browser Use chain. codex must hang off the bundled node, not
+#    off the clone's ad-hoc-signed main binary, and all three must be OpenAI-signed.
+#    Then actually invoke Browser Use — nothing below proves the socket accepts it.
+ps -Ao pid=,ppid=,command= | grep "/Applications/$NAME.app" |
+  grep -E 'Resources/codex|cua_node/bin/node'
+codesign -dv "/Applications/$NAME.app/Contents/Resources/codex" 2>&1 | grep TeamIdentifier
+# Expect: TeamIdentifier=2DC432GLL2 (NOT "not set" — that means it was ad-hoc re-signed)
+```
+
+For a CLI target, the launcher is the thing that has to be checked — a generated
+file that looks right can still resolve to the wrong account:
+
+```bash
+NAME=MyCodex; CMD=codex-myscodex          # or whatever --list reports
+
+# 1. Shape: -f shebang, marker on line 2, every unset BEFORE the first export
+sed -n '1,8p' "$(whence -p $CMD)"
+
+# 2. It really is this profile's, and really is private
+head -2 "$(whence -p $CMD)" | tail -1     # Expect: # clone-agent-profile: <NAME>
+stat -f '%Sp' "$(whence -p $CMD)"         # Expect: -rwx------
+
+# 3. The scrub holds against a hostile environment, and ambient settings survive
+env ANTHROPIC_PROFILE=x ANTHROPIC_BASE_URL=http://evil OPENAI_API_KEY=sk-x \
+    HTTPS_PROXY=http://p:1 SSH_AUTH_SOCK=/tmp/a $CMD --version
+# Expect: runs normally. Then confirm inside the CLI that it is the intended
+# account — the launcher cannot prove that for you.
+
+# 4. A dotfile cannot break it
+printf 'echo BANNER\n' >> ~/.zshenv && $CMD --version | head -1 && \
+  sed -i '' '$d' ~/.zshenv           # Expect: no BANNER in the output
 ```
 
 Do not count processes with something like `grep -oE 'Helper|...' | uniq -c` —

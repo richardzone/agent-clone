@@ -55,7 +55,7 @@ sample icons in `icons/` are there if you just want to try the flow first.
 
 | Command | Purpose |
 |---|---|
-| `./clone-agent.sh --init` | Interactive setup; asks for `all`, `app`, or `cli` (default `all`) |
+| `./clone-agent.sh --init` | Interactive setup; the target prompt offers only what is installed |
 | `./clone-agent.sh <Name> --app <kind> --icon <path>` | Create app + CLI (new-profile default) |
 | `./clone-agent.sh <Name> --app <kind> --target cli` | Create only an isolated CLI launcher |
 | `./clone-agent.sh <Name>` | Rebuild from the stored unified profile |
@@ -70,7 +70,13 @@ case-insensitive.
 
 `--target` belongs to a profile, so it cannot be combined with `--all`: each
 profile rebuilds with the target it stored. Change one with
-`./clone-agent.sh <Name> --target <target>`.
+`./clone-agent.sh <Name> --target <target>`. Profiles created before CLI support
+have no stored target and stay **app-only** until you opt in that way, so pulling
+this change never adds a launcher you did not ask for. New profiles default to
+`all`.
+
+`--all` keeps going when a profile fails and lists the failures at the end, so one
+broken profile cannot quietly stop the others from being rebuilt.
 
 For app targets, a profile name is simultaneously the `.app` filename, display
 name, process name and data directory. For CLI targets it also contributes to the
@@ -83,8 +89,11 @@ it didn't create, so a collision is reported rather than acted on.
 
 Outside the app bundle — which is why rebuilding never loses logins or history:
 
-- `~/Library/Application Support/<Name>` — Electron data, for every clone
-- `~/.codex-<Name>` — Codex only: login (`auth.json`), sessions, `config.toml`, MCP config
+- `~/Library/Application Support/<Name>` — Electron data, for every desktop clone
+- `~/.codex-<Name>` — Codex: login (`auth.json`), sessions, `config.toml`, MCP config.
+  Shared by that profile's desktop clone and its CLI launcher
+- `~/.claude-<Name>` — Claude **CLI** only: `CLAUDE_CONFIG_DIR`, holding that
+  profile's login, `settings.json` and MCP config
 
 CLI launchers are installed as `~/.local/bin/<kind>-<lowercase-name>`. Removing a
 profile for good means deleting its `.app` (if any), launcher (if any),
