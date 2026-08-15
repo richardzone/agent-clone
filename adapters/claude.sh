@@ -32,6 +32,25 @@ A_KEYCHAIN_ISOLATED=1
 # the original, so a policy deployed there would stop the original updating too.
 A_POLICY_ROOT_SUFFIX="-3p"
 
+# The two hard-coded managed-tier paths. Their mere presence matters: see
+# a_post_install, which warns when either exists.
+A_MANAGED_PLIST="/Library/Managed Preferences/com.anthropic.claudefordesktop.plist"
+A_MANAGED_PLIST_USER="/Library/Managed Preferences/${USER}/com.anthropic.claudefordesktop.plist"
+
+# Resolve the policy root the same way the app does. Note the guard: Lf() is
+#   e.endsWith("-3p") ? e : e + "-3p"
+# so a clone whose data directory already ends in -3p (a clone literally named
+# "Work-3p", which this repo's own docs now make a plausible choice) must NOT get a
+# second suffix, or we would write to <name>-3p-3p while the app reads <name>-3p.
+_a_policy_root() {
+  local data_dir="$1"
+  if [[ "$data_dir" == *${A_POLICY_ROOT_SUFFIX} ]]; then
+    print "$data_dir"
+  else
+    print "${data_dir}${A_POLICY_ROOT_SUFFIX}"
+  fi
+}
+
 a_preflight() {
   local src="$1"
   local suffix
@@ -45,11 +64,16 @@ a_preflight() {
   # What a_post_install depends on: the policy key itself, and the directory layout
   # it gets written into. If upstream renames either, the clone would silently
   # resume hourly update downloads, so fail loudly here instead.
-  if ! strings -a "$src/Contents/Resources/app.asar" 2>/dev/null | grep -q 'disableAutoUpdates'; then
+  # grep -qa reads the asar directly rather than piping through `strings`: one less
+  # dependency (strings ships with the Command Line Tools, and when it is missing
+  # the pipe reports "key gone" — an upstream change that never happened), and it
+  # is an order of magnitude faster since grep stops at the first match.
+  local asar="$src/Contents/Resources/app.asar"
+  if ! grep -qa 'disableAutoUpdates' "$asar"; then
     print "disableAutoUpdates not found in app.asar — the auto-update policy key is gone"; return 1
   fi
   print "   disableAutoUpdates policy key ✓"
-  if ! strings -a "$src/Contents/Resources/app.asar" 2>/dev/null | grep -q 'configLibrary'; then
+  if ! grep -qa 'configLibrary' "$asar"; then
     print "configLibrary not found in app.asar — the local-tier layout has changed"; return 1
   fi
   print "   configLibrary layout ✓"
@@ -85,9 +109,16 @@ a_rename_helpers() {
 # policy file written by a_post_install instead.
 a_extra_plist() { :; }
 
-# Claude only needs the Electron-level isolation, so the wrapper gets no extra env.
-# Deliberately NOT setting CLAUDE_CONFIG_DIR — see the note at the top of this file.
-a_wrapper_env() { :; }
+a_wrapper_env() {
+  # Scrub, don't set. CLAUDE_USER_DATA_DIR flips the app onto the other branch of
+  # Lf() — it then uses userData unsuffixed, so the policy file this adapter writes
+  # to <userData>-3p is never read and auto-updates quietly resume, with preflight
+  # still reporting ✓. Inheriting it from the user's shell is enough to trigger
+  # that, so clear it here; unsetting also makes A_POLICY_ROOT_SUFFIX
+  # unconditionally correct rather than correct-unless-the-environment-says-otherwise.
+  print 'unset CLAUDE_USER_DATA_DIR'
+  # Deliberately NOT setting CLAUDE_CONFIG_DIR — see the note at the top of this file.
+}
 
 a_sign_extra() {
   local app="$1" h f
@@ -111,7 +142,21 @@ a_post_install() {
   # ("Could not locate update bundle", the bundle ID no longer matches), which is
   # harmless but pure wasted bandwidth.
   node "$REPO_DIR/tools/write-config-library.js" \
-    "${data_dir}${A_POLICY_ROOT_SUFFIX}/configLibrary" '{"disableAutoUpdates":true}'
+    "$(_a_policy_root "$data_dir")/configLibrary" '{"disableAutoUpdates":true}' || return 1
+
+  # The local tier only wins while the managed tier is unusable. The precedence is
+  # coarser than it looks: the app discards the local tier whole as soon as the
+  # managed plist carries any key that is not app-behaviour-only — an egress
+  # allowlist or MCP policy is enough. So *any* MDM management of Claude, not just
+  # an update policy, silently re-enables updates here, and nothing is logged when
+  # it does (the "disabled by enterprise policy" line only appears when the policy
+  # is applied, never when it is dropped).
+  if [[ -f "$A_MANAGED_PLIST" || -f "$A_MANAGED_PLIST_USER" ]]; then
+    warn "   ⚠️ This machine has an MDM-managed Claude configuration."
+    warn "      Managed policy replaces the local tier wholesale, so the file just written"
+    warn "      may be ignored and ${name} would auto-update again — silently."
+    warn "      Verify after launching: grep '\\[updater\\]' ~/Library/Logs/${name}/main.log"
+  fi
 }
 
 a_notes() {
