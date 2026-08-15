@@ -112,7 +112,7 @@ function main() {
   // one indistinguishable from something safe to delete.
   const entries = Array.isArray(meta.entries) ? meta.entries : [];
   if (!entries.some(e => e && e.id === appliedId)) {
-    entries.push({ id: appliedId, name: 'clone-app.sh policy — do not delete' });
+    entries.push({ id: appliedId, name: 'clone-agent.sh policy — do not delete' });
   }
 
   // Config first, then the meta that points at it: if this is interrupted between

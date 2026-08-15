@@ -7,7 +7,7 @@ Notes for whoever maintains this repository next — human or AI.
 > of Claude or Codex, you want [README.md](README.md) instead.
 
 Every item below corresponds to a real failure. Read them before changing
-anything under `clone-app.sh`, `adapters/`, or `tools/`.
+anything under `clone-agent.sh`, `adapters/`, or `tools/`.
 
 ---
 
@@ -80,9 +80,10 @@ version** (e.g. `151.0.7922.76`, not Claude's `A`). Resolve it through the
 
 `codesign --deep` is deprecated by Apple **for signing** and produces mismatched
 signatures on nested helpers. The correct order is: adapter-specific deep content
-(helpers inside the framework, `Libraries`, `PlugIns`, Codex's `Resources/codex`)
-→ the frameworks themselves → native modules outside the asar → the real main
-binary → **the outer bundle last**, so its seal covers everything already signed.
+(helpers inside the framework, `Libraries`, `PlugIns`) → the frameworks themselves
+→ native modules outside the asar → the real main binary → **the outer bundle
+last**, so its seal covers everything already signed. Codex's `Resources/codex`
+is the deliberate exception: keep its original Developer ID signature (section 13).
 
 `--deep` is fine — and recommended — for **verification**
 (`codesign --verify --deep --strict`).
@@ -277,6 +278,87 @@ So this is a decision to confirm before acting on, not a default to apply. If it
 wanted, say plainly that the split starts at the next launch and is not reversible
 by rebuilding.
 
+## 13. Browser Use needs three consecutive OpenAI-signed processes
+
+**Symptom:** Browser Use hangs or reports no available browser in a Codex clone,
+even though the app has created sockets under `/tmp/codex-browser-use/`.
+
+`browser-use-peer-authorization.node` validates the connecting `node_repl`
+process, its parent and its grandparent. All three must have an allowed OpenAI
+Team ID and signing identifier. A direct clone launch produces
+`node_repl → codex → <clone main>`; re-signing the latter two ad-hoc makes the
+socket reject the client immediately.
+
+The Codex adapter sets `CODEX_CLI_PATH` to a tiny shell launcher which immediately
+`exec`s the original signed Node binary. That Node process runs a JS launcher and
+spawns the untouched signed `Resources/codex`, producing the accepted chain
+`node_repl → codex → node`. Do not ad-hoc sign `Resources/codex`, the bundled Node,
+or `node_repl`, and do not replace this with a bypass in the authorization module.
+
+Be accurate about what this does and does not preserve. The check the module
+enforces is "these three processes carry an OpenAI signing identity". After this
+change the middle process is an OpenAI-signed **general-purpose Node interpreter
+running `Resources/codex-cli-launcher.cjs`**, a plain file inside the clone that
+the local user can edit — replacing its body and re-sealing the bundle with a
+credential-free `codesign --force --sign -` is enough to run arbitrary JS under
+that trusted identity. The outer seal detects tampering, and same-user local code
+execution is already a precondition, so the practical exposure is small. But this
+is a launch-path correction that *relaxes* the property from "only OpenAI-signed
+code" to "OpenAI-signed Node running a local script" — not a no-op. Call it a
+deliberate trade-off of running an ad-hoc-signed clone, not "not a bypass".
+
+Both signature assertions in `a_preflight` are warnings, not hard failures: the
+identifiers and Team ID are pinned to what OpenAI ships today, and a rotation
+should not block building a clone that would otherwise work.
+
+Two launch-path details that are easy to undo by accident:
+
+- `tools/codex-cli-launcher` must keep `#!/bin/zsh -f`. A non-interactive zsh
+  still sources `~/.zshenv`, and this process's stdout **is** the app-server's
+  JSON-RPC channel — one `echo` in a dotfile breaks the handshake, which presents
+  as exactly the symptom above.
+- `codex-cli-launcher.cjs` must not gate signal forwarding on `child.killed`.
+  That flag records only that `kill()` was once called, so it makes every signal
+  after the first a no-op while Node's own default disposition stays suppressed —
+  leaving the launcher and a stuck `codex` killable only by `SIGKILL`.
+
+## 14. CLI launchers belong to the unified profile
+
+Do not add a second management script or a second profiles directory. The engine
+owns both targets through `P_TARGET=all|app|cli` in `profiles/<Name>.conf`; the
+small files under `~/.local/bin` are generated launchers, not another source of
+configuration.
+
+Launchers must contain no credentials. Codex selects a per-profile `CODEX_HOME`
+and forces file storage for account and MCP OAuth credentials. Claude selects a
+per-profile `CLAUDE_CONFIG_DIR`. Keep literal `$HOME` values single-quoted in the
+profile, as described in section 8.
+
+Four properties of a generated launcher are load-bearing. Each replaced something
+that failed:
+
+1. **`#!/bin/zsh -f`.** A non-interactive zsh sources `~/.zshenv`, which can print
+   into piped output and can define a function that shadows the vendor command.
+2. **An absolute path in the `exec` line**, resolved once with `whence -p`.
+   `command -v` returns a same-named shell function, and the `-n` check still
+   passes.
+3. **`unset -m` over whole vendor namespaces, before any `export`.** A list of
+   individual credential variables fails open on every vendor release; see
+   "Why a namespace, not a list" in adapters/README.md. Reversing the order lets
+   the launcher clear the very variable that selects the profile.
+4. **The `# clone-agent-profile: <Name>` marker on line 2.** The engine refuses to
+   overwrite a launcher path whose line 2 does not match. Without it, a
+   `--cli-name` collision silently destroys a vendor CLI, an unrelated tool in the
+   same directory, or another profile's launcher — and still prints `Done.` The
+   `.app` path has had an equivalent provenance guard from the beginning; this is
+   that guard, for the other half of the profile. Do not reword the marker into
+   prose: it is parsed.
+
+Profile names must also be unique **case-insensitively**. macOS filesystems are
+case-insensitive by default, and the bundle ID and default CLI command both
+lowercase the name — so `Work` and `WORK` would share one profile file, one
+launcher and one data directory.
+
 ---
 
 ## Adding an adapter for a new app
@@ -333,9 +415,50 @@ grep -aE '\[updater\]|CCD-autoupdate' ~/Library/Logs/$NAME/main.log | tail -5
 #    all, so Sparkle never reads its own settings. Checking the setting proves nothing.
 defaults read com.openai.codex.<clone> SULastCheckTime
 
-# 8. The wrapper really carries the isolation variables into the process
+# 8. The wrapper really carries the isolation variables into the process.
+#    Expect per app: Codex → CODEX_HOME, CODEX_SPARKLE_ENABLED, CODEX_CLI_PATH.
+#    Claude → nothing here but the --user-data-dir argument; its wrapper only
+#    *unsets* CLAUDE_USER_DATA_DIR and deliberately never sets CLAUDE_CONFIG_DIR
+#    (section 12). A Claude clone matching nothing is correct, not a failure —
+#    check the argument instead.
 ps eww -p "$(pgrep -xf "/Applications/$NAME.app/Contents/MacOS/$NAME.*" | head -1)" |
-  tr ' ' '\n' | grep -E 'CLAUDE_CONFIG_DIR|CODEX_HOME|CODEX_SPARKLE_ENABLED'
+  tr ' ' '\n' | grep -E 'CODEX_HOME|CODEX_SPARKLE_ENABLED|CODEX_CLI_PATH|--user-data-dir'
+#    And that CLAUDE_USER_DATA_DIR really is absent, since inheriting it would
+#    silently re-enable Claude's auto-updates (section 10):
+ps eww -p "$(pgrep -xf "/Applications/$NAME.app/Contents/MacOS/$NAME.*" | head -1)" |
+  tr ' ' '\n' | grep -c 'CLAUDE_USER_DATA_DIR'      # Expect: 0
+
+# 9. Codex only: the Browser Use chain. codex must hang off the bundled node, not
+#    off the clone's ad-hoc-signed main binary, and all three must be OpenAI-signed.
+#    Then actually invoke Browser Use — nothing below proves the socket accepts it.
+ps -Ao pid=,ppid=,command= | grep "/Applications/$NAME.app" |
+  grep -E 'Resources/codex|cua_node/bin/node'
+codesign -dv "/Applications/$NAME.app/Contents/Resources/codex" 2>&1 | grep TeamIdentifier
+# Expect: TeamIdentifier=2DC432GLL2 (NOT "not set" — that means it was ad-hoc re-signed)
+```
+
+For a CLI target, the launcher is the thing that has to be checked — a generated
+file that looks right can still resolve to the wrong account:
+
+```bash
+NAME=MyCodex; CMD=codex-mycodex          # or whatever --list reports
+
+# 1. Shape: -f shebang, marker on line 2, every unset BEFORE the first export
+sed -n '1,8p' "$(whence -p $CMD)"
+
+# 2. It really is this profile's, and really is private
+head -2 "$(whence -p $CMD)" | tail -1     # Expect: # clone-agent-profile: <NAME>
+stat -f '%Sp' "$(whence -p $CMD)"         # Expect: -rwx------
+
+# 3. The scrub holds against a hostile environment, and ambient settings survive
+env ANTHROPIC_PROFILE=x ANTHROPIC_BASE_URL=http://evil OPENAI_API_KEY=sk-x \
+    HTTPS_PROXY=http://p:1 SSH_AUTH_SOCK=/tmp/a $CMD --version
+# Expect: runs normally. Then confirm inside the CLI that it is the intended
+# account — the launcher cannot prove that for you.
+
+# 4. A dotfile cannot break it
+printf 'echo BANNER\n' >> ~/.zshenv && $CMD --version | head -1 && \
+  sed -i '' '$d' ~/.zshenv           # Expect: no BANNER in the output
 ```
 
 ⚠️ **`open` will not restart a clone that is still running** — it just activates

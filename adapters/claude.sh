@@ -1,13 +1,24 @@
 #!/bin/zsh
 # Adapter: Claude desktop (Anthropic)
 #
-# Loaded by clone-app.sh. Interface contract: adapters/README.md.
+# Loaded by clone-agent.sh. Interface contract: adapters/README.md.
 
 A_LABEL="Claude"
 A_SOURCE_DEFAULT="/Applications/Claude.app"
 A_EXEC_NAME="Claude"                                  # original executable under Contents/MacOS/
 A_BUNDLE_ID_BASE="com.anthropic.claudefordesktop"
 A_FRAMEWORK=""                                        # main framework name; empty = nothing special
+A_CLI_COMMAND="claude"
+A_CLI_HOME_TEMPLATE='$HOME/.claude-<NAME>'
+# Namespaces the generated launcher clears before setting anything. Deliberately
+# CLAUDE_* rather than CLAUDE_CODE_*: the identity-relevant variables are spread
+# across both. CLAUDE_SECURESTORAGE_CONFIG_DIR is the reason it matters — Claude
+# Code suffixes its keychain service name with a hash of the secure-storage
+# directory, and falls back to CLAUDE_CONFIG_DIR only while that variable is
+# *undefined*. An ambient empty value drops the suffix entirely and re-points the
+# profile at the default account's entry, so clearing it is what preserves
+# per-profile keychain isolation; nothing needs to re-set it afterwards.
+A_CLI_ENV_NAMESPACES=('ANTHROPIC_*' 'CLAUDE_*')
 
 # Claude's keychain service name derives from productName in the asar's
 # package.json, so changing productName yields a separate "<Name> Safe Storage"
@@ -120,6 +131,21 @@ a_wrapper_env() {
   # Deliberately NOT setting CLAUDE_CONFIG_DIR — see the note at the top of this file.
 }
 
+a_cli_preflight() { :; }
+
+# The engine has already cleared A_CLI_ENV_NAMESPACES by the time this runs, so
+# the profile's own directory is the only thing left to establish. Per-profile
+# tuning belongs in that directory's settings.json, which is isolated with it —
+# not in ambient environment variables, which are not.
+a_cli_wrapper_env() {
+  local name="$1"
+  print "export CLAUDE_CONFIG_DIR=\"${A_CLI_HOME_TEMPLATE//<NAME>/$name}\""
+}
+
+# $agent_cli is resolved by the engine on the lines just above this one: the path
+# pinned at preflight, or a PATH lookup if a runtime manager has since moved it.
+a_cli_exec() { print 'exec "$agent_cli" "$@"'; }
+
 a_sign_extra() {
   local app="$1" h f
   # Contents of Helpers/ vary by release (1.28929 added app-cu-helper), so don't
@@ -163,7 +189,21 @@ a_notes() {
   local name="$1"
   print ""
   print "  Auto-updates are off via the clone's own policy file; rebuild with"
-  print "  ./clone-app.sh ${name} after the original updates."
-  print "  Note: Claude Code's config (~/.claude — settings, sessions, history,"
-  print "  plugins) is shared with the original app and the claude CLI."
+  print "  ./clone-agent.sh ${name} after the original updates."
+  print "  Note: the desktop app's built-in Claude Code reads ~/.claude, shared with"
+  print "  the original app and the stock claude CLI. This profile's *generated* CLI"
+  print "  launcher is the exception — it gets its own \$CLAUDE_CONFIG_DIR."
+}
+
+a_cli_notes() {
+  local name="$1"
+  print "  The launcher clears ANTHROPIC_* and CLAUDE_* before selecting this profile,"
+  print "  so subscription login is deterministic. Run /login on first use."
+  print "  This is a different config root from the desktop clone's built-in Claude"
+  print "  Code, which deliberately keeps sharing ~/.claude — see the note at the top"
+  print "  of adapters/claude.sh."
+  print "  Per-profile settings belong in \$CLAUDE_CONFIG_DIR/settings.json (it has an"
+  print "  'env' block) — ambient variables no longer reach the CLI, and MCP servers"
+  print "  spawned by it inherit the cleared environment too, so give any that need an"
+  print "  API key a per-server 'env' entry in that profile's MCP config."
 }

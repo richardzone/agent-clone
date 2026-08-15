@@ -1,21 +1,25 @@
-# Profile format reference — the clone parameters for one app.
+# Profile format reference — unified desktop app and CLI parameters for one account.
 #
 # This file is never read by the engine: --list and --all only scan
 # profiles/*.conf, and this one ends in .conf.sample, so it is not mistaken for a
 # real clone.
 #
-# Real profiles are written automatically by clone-app.sh on first creation, and
+# Real profiles are written automatically by clone-agent.sh on first creation, and
 # the filename is the clone name:
 #
-#   ./clone-app.sh MyClaude --app claude --icon ~/Pictures/my-claude.png
+#   ./clone-agent.sh MyClaude --app claude --icon ~/Pictures/my-claude.png
 #       -> writes profiles/MyClaude.conf
 #
-# After that, ./clone-app.sh MyClaude (or --all for everything) rebuilds from it
+# After that, ./clone-agent.sh MyClaude (or --all for everything) rebuilds from it
 # with no further arguments. Hand-editing is rarely needed: to change the icon,
 # just re-run the command with a new --icon.
 
 # Which app to clone; maps to adapters/<kind>.sh. Currently claude | codex
 P_APP='claude'
+
+# What this profile manages: all | app | cli. Defaults to all. Belongs to the
+# profile, so --all never overrides it — change it per profile.
+P_TARGET='all'
 
 # Icon path (.icns). Relative paths resolve against the repo root, which keeps
 # profiles portable across machines.
@@ -37,3 +41,15 @@ P_SOURCE='/Applications/Claude.app'
 
 # Where to install the clone
 P_DEST_DIR='/Applications'
+
+# Generated CLI launcher. Defaults are derived from P_APP and the profile name.
+P_CLI_NAME='claude-myclaude'
+
+# $HOME stays literal for portability and expands when clone-agent.sh runs. A
+# quoted '~' is NOT expanded and is rejected — write $HOME or an absolute path.
+P_CLI_BIN_DIR='$HOME/.local/bin'
+
+# Source app version this profile was last built against. The engine warns when
+# the installed app has moved on, because some upstream invariants an adapter
+# depends on (see AGENTS.md §13) cannot be tested by preflight.
+P_VERIFIED_SOURCE_VERSION='0.2026.8.5'

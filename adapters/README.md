@@ -1,8 +1,10 @@
 # Adapter interface contract
 
-`clone-app.sh` is a generic engine. It only knows the main line: copy the bundle →
+`clone-agent.sh` is a generic engine. It manages a unified profile and dispatches
+its `app`, `cli`, or `all` target. For apps, the main line is copy the bundle →
 rewrite identity → patch the asar → install a wrapper → sign inside-out → adapter
-post-install.
+post-install. For CLIs, it generates a profile launcher that selects the isolated
+agent home.
 **Everything app-specific lives in an adapter.**
 
 Supporting a new app means writing `<kind>.sh` in this directory and referring to
@@ -12,7 +14,8 @@ in the engine.
 Two implementations to copy from:
 
 - `claude.sh` — standard Electron layout (helpers under `Contents/Frameworks/`,
-  paths derived from `CFBundleName`), plus the only `a_post_install` in the repo
+  paths derived from `CFBundleName`), plus the only `a_post_install` that does any
+  work — `codex.sh` defines the hook as a no-op
 - `codex.sh` — Chromium-style layout (helpers inside the framework) plus an extra
   environment-variable isolation layer (`CODEX_HOME`)
 
@@ -46,6 +49,9 @@ Consequently:
 | `A_SOURCE_DEFAULT` | Default path to the source app; overridable with `--source` |
 | `A_EXEC_NAME` | Original executable name under `Contents/MacOS/`. The engine renames it to the clone name and writes the wrapper in its place — that way `CFBundleExecutable` never changes while the process name shows the clone |
 | `A_BUNDLE_ID_BASE` | Bundle ID prefix. The engine forms `<base>.<lowercased clone name>`; overridable with `--bundle-id` |
+| `A_CLI_COMMAND` | Vendor CLI command. The engine resolves it once with `whence -p` and bakes the absolute path into the launcher — never `command -v`, which would return a same-named shell function |
+| `A_CLI_HOME_TEMPLATE` | Literal portable path containing `<NAME>`, such as `$HOME/.claude-<NAME>` |
+| `A_CLI_ENV_NAMESPACES` | Array of globs the launcher clears before the adapter sets anything, e.g. `('ANTHROPIC_*' 'CLAUDE_*')`. See "Why a namespace, not a list" below |
 
 Get `A_EXEC_NAME` wrong and the engine fails at step 8 with "Main executable not
 found".
@@ -64,16 +70,18 @@ documentation:
 
 ## Functions
 
-**All seven must be defined** — the engine calls them unconditionally. Write a
+**All eleven must be defined** — the engine calls the target-relevant set, and
+checks for every one of them up front (see "How adapters are loaded"). Write a
 no-op for the ones you don't need:
 
 ```zsh
 a_notes() { :; }
 ```
 
-The engine verifies all seven exist right after sourcing the adapter, before
-anything is written, and names the missing one. `a_post_install` is the newest and
-is what an adapter written against the earlier six-hook contract will be missing.
+The engine verifies all eleven exist right after sourcing the adapter, before
+anything is written, and names the missing one. The four `a_cli_*` hooks are the
+newest and are what an adapter written against the earlier seven-hook contract
+will be missing.
 
 Call order (numbers refer to the engine's steps):
 
@@ -86,6 +94,10 @@ Call order (numbers refer to the engine's steps):
 | 9/9 re-sign (**before** the engine's generic loops) | `a_sign_extra` | clone app path |
 | Post-install, after the bundle is complete | `a_post_install` | clone name, **expanded** data dir |
 | After everything succeeds | `a_notes` | clone name |
+| CLI preflight, before any writes | `a_cli_preflight` | none |
+| CLI launcher generation | `a_cli_wrapper_env` | clone name |
+| CLI launcher generation | `a_cli_exec` | none — emit `exec "$agent_cli" …` |
+| After CLI succeeds | `a_cli_notes` | clone name |
 
 ### `a_preflight <src>`
 
@@ -101,9 +113,17 @@ what is missing — that is what tells the user which line of the adapter to fix
 *inside the function*. A failing command in there will **not** abort; execution
 continues to the end and returns the status of the last command.
 
-The other five functions are called directly, so `set -e` applies normally: any
-non-zero return inside them terminates the whole script. Append `|| true` to
-commands that are expected to fail sometimes.
+`a_cli_preflight` and `a_post_install` are called the same way
+(`a_cli_preflight || die ...`, `a_post_install ... || die ...`) and carry the same
+requirement. That is three hooks, not two — `a_post_install` is easy to miscount
+because it runs late, among the hooks that *are* protected.
+
+The other eight functions are called directly, so `set -e` applies normally: any
+non-zero return inside them terminates the whole script — silently, since there is
+no `die` to print anything. Append `|| true` to commands that are expected to fail
+sometimes, and `|| die "..."` to ones whose failure actually matters. A bare
+`codesign --verify ... >/dev/null 2>&1` in `a_sign_extra` is the trap: it reads
+like a check, and it aborts the whole run with an empty terminal.
 
 ### `a_rename_helpers <app> <name>`
 
@@ -148,8 +168,10 @@ Sign adapter-specific deep content. The engine then signs
 the real main binary → the outer bundle.
 
 So handle only what those loops don't reach: helpers, `Libraries/` and `PlugIns/`
-*inside* a framework, plus any standalone binaries the bundle ships (Codex's
-`Contents/Resources/codex`).
+*inside* a framework, plus any standalone binaries the bundle ships. An adapter
+may deliberately preserve an upstream signature instead: Codex must keep the
+Developer ID signature on `Contents/Resources/codex` for Browser Use peer
+authentication.
 
 Work **inside-out** here as well: deepest first, so the outer seals cover what is
 already signed. **Never sign with `codesign --deep`** — Apple deprecated it for
@@ -171,10 +193,63 @@ Two things follow from where that directory lives:
 - **The path is passed expanded.** `DATA_DIR` carries a literal `$HOME` so it can
   go into the wrapper verbatim; the engine expands it before calling you.
 
+⚠️ **You must `return 1` explicitly**, exactly as for `a_preflight`. The engine
+calls this as `a_post_install ... || die ...`, and being on the left of `||`
+disables `set -e` *inside the function* — a failing command in there does **not**
+abort, execution runs on to the end, and the hook returns the status of its last
+statement. Get this wrong and the engine prints `Done.` while `a_notes` announces
+that auto-updates are off, with no policy file on disk. That is the exact silent
+failure this hook exists to prevent, so end every fallible step with
+`|| return 1`.
+
 ### `a_notes <name>`
 
 Printed to the user once everything succeeds. A good place for app-specific
 caveats. No-op if there are none.
+
+### CLI functions
+
+`a_cli_preflight` verifies whatever the CLI half depends on, before anything is
+written. Same `return 1` rule as `a_preflight`. No-op if there is nothing to check.
+
+`a_cli_wrapper_env <name>` prints the `export` lines that select this profile's
+isolated directory. It does **not** need to clear anything — the engine has
+already emitted `unset -m` for every glob in `A_CLI_ENV_NAMESPACES` by the time it
+runs, and that ordering is load-bearing, since these exports live inside those
+same namespaces.
+
+`a_cli_exec` prints the final `exec` line and must forward `"$@"`. Emit
+`exec "$agent_cli" … "$@"`, never the bare command name: the engine has already
+written the lines that set `$agent_cli` to the path resolved at preflight, falling
+back to a `PATH` lookup if a runtime manager has since moved it. The launcher runs
+under `#!/bin/zsh -f`, so `PATH` is whatever the caller had, and a shell function
+named after the vendor command must not be able to shadow it.
+
+`a_cli_notes <name>` explains first-login and authentication behaviour. Mention
+that MCP servers inherit the cleared environment — that failure mode is not
+guessable from its symptom.
+
+Launchers must never embed tokens.
+
+#### Why a namespace, not a list
+
+The obvious implementation is a list of credential variables to `unset`. It was
+tried and it rotted: by the time this was reviewed, the Claude launcher was
+clearing four of seven provider selectors and none of the identity variables that
+the vendor documents as outranking `/login`. A denylist fails **open** — every
+variable the vendor adds is one the launcher does not know to clear, and nothing
+reports it.
+
+Clearing the whole namespace fails **closed** instead: a new vendor variable is
+excluded by construction. The cost is that legitimate per-profile tuning has to
+move out of the ambient environment and into the profile's own config file
+(`settings.json` for Claude, `config.toml` for Codex) — which is where an
+isolation tool wants it anyway, since those files are isolated with the profile
+and ambient variables are not.
+
+Two mechanical rules when adding an adapter: quote every glob (a generated
+launcher does not inherit the engine's `NULL_GLOB`, so a bare `FOO_*` dies with
+`no matches found`), and never emit an `export` before the wipe.
 
 ---
 
@@ -193,5 +268,5 @@ re-sign → **actually launch it and confirm the processes are healthy**. A run 
 completes without errors proves nothing; the verification checklist in
 [../AGENTS.md](../AGENTS.md) has ready-to-use commands.
 
-Once it works by hand, slot each step into one of the seven functions above — that's
+Once it works by hand, slot each step into one of the eleven functions above — that's
 your adapter.
