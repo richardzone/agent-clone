@@ -55,15 +55,25 @@ a_preflight() {
   print "   Helpers inside the framework ✓ ($(ls "$fwdir/Helpers" | grep -c '\.app$') .app bundles)"
   # CODEX_HOME support is what makes data isolation possible; without it the clone
   # would share ~/.codex with the original.
-  if ! strings -a "$src/Contents/Resources/app.asar" 2>/dev/null | grep -q 'CODEX_HOME'; then
+  # grep -qa reads the asar directly instead of piping through `strings`: one less
+  # dependency (a missing `strings` would otherwise be reported as an upstream
+  # change that never happened) and much faster, since grep stops at the first match.
+  local asar="$src/Contents/Resources/app.asar"
+  if ! grep -qa 'CODEX_HOME' "$asar"; then
     print "CODEX_HOME not found in app.asar — data isolation may no longer work"; return 1
   fi
   print "   CODEX_HOME support ✓"
+  # The clone's only working auto-update switch. If upstream drops it the clone
+  # would silently start checking again, so fail loudly here instead.
+  if ! grep -qa 'CODEX_SPARKLE_ENABLED' "$asar"; then
+    print "CODEX_SPARKLE_ENABLED not found in app.asar — the auto-update switch is gone"; return 1
+  fi
+  print "   CODEX_SPARKLE_ENABLED support ✓"
   # Browser Use authenticates node_repl plus its parent and grandparent. The clone's
   # Electron executable is necessarily ad-hoc signed, so the adapter routes app-server
   # startup through the bundled OpenAI-signed Node executable. This override is the
   # supported entry point for doing that without modifying the asar again.
-  if ! strings -a "$src/Contents/Resources/app.asar" 2>/dev/null | grep -q 'CODEX_CLI_PATH'; then
+  if ! grep -qa 'CODEX_CLI_PATH' "$asar"; then
     print "CODEX_CLI_PATH not found in app.asar — Browser Use isolation may no longer work"; return 1
   fi
   local codex_bin="$src/Contents/Resources/codex"
@@ -86,7 +96,7 @@ a_preflight() {
     print "   Browser Use signed launch chain ✓"
   else
     print "   ⚠️  Bundled codex/Node no longer carry the expected OpenAI signature."
-    print "      The clone will still build; Browser Use may stop working (AGENTS.md §10)."
+    print "      The clone will still build; Browser Use may stop working (AGENTS.md §13)."
   fi
 }
 
@@ -94,23 +104,26 @@ a_preflight() {
 # affect them and no renaming is required.
 a_rename_helpers() { print "   (Codex helpers anchor to the framework name; no renaming needed)"; }
 
-a_extra_plist() {
-  local plist="$1"
-  # Codex auto-updates via Sparkle. These two keys are absent from the original
-  # Info.plist (the feed is configured in code), so add them as false to disable
-  # automatic checks and installs — otherwise Sparkle would overwrite the clone
-  # with the official package and wipe every customisation.
-  /usr/libexec/PlistBuddy -c "Add :SUEnableAutomaticChecks bool false" "$plist" 2>/dev/null ||
-    /usr/libexec/PlistBuddy -c "Set :SUEnableAutomaticChecks false" "$plist"
-  /usr/libexec/PlistBuddy -c "Add :SUAutomaticallyUpdate bool false" "$plist" 2>/dev/null ||
-    /usr/libexec/PlistBuddy -c "Set :SUAutomaticallyUpdate false" "$plist"
-  print "   Sparkle auto-update disabled"
-}
+# Auto-update is disabled through the wrapper (CODEX_SPARKLE_ENABLED), not here.
+# Earlier versions wrote SUEnableAutomaticChecks/SUAutomaticallyUpdate into this
+# plist; that was measured to have no effect and has been removed — see AGENTS.md
+# "Sparkle reads NSUserDefaults before Info.plist".
+a_extra_plist() { :; }
 
 a_wrapper_env() {
   local name="$1"
   # Second isolation layer: login state, sessions and MCP config all live under CODEX_HOME
   print "export CODEX_HOME=\"${A_CODEX_HOME_TEMPLATE//<NAME>/$name}\""
+  # Kill the updater at the root. Codex gates Sparkle on this variable itself:
+  #   shouldIncludeSparkle(flavor, platform, env) =
+  #       env.CODEX_SPARKLE_ENABLED !== 'false' && <flavor is shipping> && platform === 'darwin'
+  # and the result feeds sparkleManager's enableUpdater, whose initializeUpdater()
+  # returns early when false — so no feed is fetched, no update is staged, and the
+  # header's update button never appears.
+  # This has to be an environment variable: the Info.plist route does not work
+  # (see AGENTS.md), and `defaults write` gets overwritten by Codex's own
+  # sparkle.node, which calls setAutomaticallyChecksForUpdates: on launch.
+  print "export CODEX_SPARKLE_ENABLED=false"
   # Route app-server startup through a signed Node parent. The launcher ultimately
   # runs the untouched bundled codex binary with the exact arguments it received.
   print 'export CODEX_CLI_PATH="$APP_DIR/../Resources/codex-cli-launcher"'
@@ -198,9 +211,17 @@ a_sign_extra() {
   done
 }
 
+# Nothing to set up in the data directory: CODEX_HOME already isolates everything
+# that matters, and the updater is disabled via the wrapper environment.
+a_post_install() { :; }
+
 a_notes() {
   local name="$1"
   print ""
+  print "  Launch this clone through its wrapper — open -a ${name}, the Dock, or"
+  print "  Contents/MacOS/ChatGPT. Running Contents/MacOS/${name} directly skips the"
+  print "  wrapper, and with it CODEX_SPARKLE_ENABLED, so Sparkle starts and can"
+  print "  replace the clone with the official package."
   print "  Note: Codex's keychain service names (Codex Safe Storage / Storage Key /"
   print "  MCP Credentials) are compiled into native code and unaffected by productName,"
   print "  so the clone shares those entries with the original."

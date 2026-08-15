@@ -90,14 +90,28 @@ it didn't create, so a collision is reported rather than acted on.
 Outside the app bundle — which is why rebuilding never loses logins or history:
 
 - `~/Library/Application Support/<Name>` — Electron data, for every desktop clone
-- `~/.codex-<Name>` — Codex: login (`auth.json`), sessions, `config.toml`, MCP config.
-  Shared by that profile's desktop clone and its CLI launcher
-- `~/.claude-<Name>` — Claude **CLI** only: `CLAUDE_CONFIG_DIR`, holding that
-  profile's login, `settings.json` and MCP config
+- `~/Library/Application Support/<Name>-3p` — Claude only: the app's own policy
+  store, which is where auto-updates are switched off
+- `~/.codex-<Name>` — Codex: login (`auth.json`), sessions, `config.toml`, MCP
+  config. Shared by that profile's desktop clone and its CLI launcher
+- `~/.claude-<Name>` — Claude **CLI launcher** only: the `CLAUDE_CONFIG_DIR` this
+  tool generates, holding that profile's login, `settings.json` and MCP config
+
+The **desktop** clone's `~/.claude` is deliberately *not* isolated. Claude Desktop
+runs its own bundled Claude Code, and that reads `~/.claude` — the same directory
+as the original app and the stock `claude` CLI — so settings, sessions, history and
+plugins are shared. Usually that is what you want (one set of skills and settings
+everywhere), and splitting it is effectively one-way: sessions written afterwards
+land in the new directory and cannot be merged back cleanly.
+
+A generated Claude **CLI launcher** is the deliberate exception, because a launcher
+exists precisely to pin one account: it sets its own `CLAUDE_CONFIG_DIR`. So within
+one profile, `claude-<name>` and the desktop clone's built-in Claude Code do not
+share config. Codex has no such split — both surfaces use the one `CODEX_HOME`.
 
 CLI launchers are installed as `~/.local/bin/<kind>-<lowercase-name>`. Removing a
 profile for good means deleting its `.app` (if any), launcher (if any),
-`profiles/<Name>.conf`, and the data directories.
+`profiles/<Name>.conf`, and the data directories above.
 
 Note that each clone gets its own bundle ID, and macOS grants permissions
 (notifications, microphone, screen recording, …) per bundle ID — so a clone asks for
@@ -116,10 +130,9 @@ That said, a few consequences are worth knowing:
 - **Clones lose Apple's signature and notarization.** Modifying a bundle
   invalidates its signature, so the script re-signs ad-hoc (`codesign --sign -`).
   A clone is therefore no longer covered by full Gatekeeper validation.
-- **Clones receive no security updates.** Built-in auto-update has to be disabled
-  (it would overwrite the clone with the official package, wiping every change and
-  usually breaking it outright), so you rebuild by hand after each upstream
-  release — see below.
+- **Clones receive no security updates.** Cloning switches built-in auto-update
+  off — via each app's own supported mechanism, and only for the clone — so you
+  rebuild by hand after each upstream release. See below.
 - **Whether multi-account use fits each service's terms is yours to check.** This
   repo solves the technical isolation problem only; it grants no permission to use
   any service.
@@ -130,13 +143,31 @@ Not affiliated with Anthropic or OpenAI. Use at your own risk.
 
 ## Upstream updates require a manual rebuild
 
-**Clones do not auto-update, and must not be allowed to.**
+**Clones do not auto-update.** Both adapters now switch the updater off as part of
+cloning, each through that app's own supported mechanism, scoped to the clone:
 
-A clone's built-in updater (Squirrel for Claude, Sparkle for Codex) would
-download the official package and overwrite itself, discarding every
-customisation — and since the new package's signature and bundle name no longer
-match, it usually just crashes. The Codex adapter disables Sparkle's automatic
-checks explicitly; for Claude, **ignore any update prompt you see**.
+| | How it is disabled |
+|---|---|
+| Claude | the `disableAutoUpdates` policy key, written into the clone's own data directory (`<Name>-3p/configLibrary/`) |
+| Codex | `CODEX_SPARKLE_ENABLED=false` in the wrapper — the same predicate Codex's own code uses to decide whether Sparkle runs |
+
+Neither touches the original, and neither needs `sudo`. Note that `Info.plist` is
+*not* one of the working routes for either app — see [AGENTS.md](AGENTS.md) if you
+are tempted to add keys there.
+
+**The two are not equally robust.** Claude's is a file in the clone's data
+directory, so it applies however the app is started. Codex's is an environment
+variable set by the wrapper, so it only applies when the wrapper runs — start
+`Contents/MacOS/<Name>` directly and Sparkle is live again. Launch Codex clones via
+the Dock, `open -a`, or the wrapper. On a Claude clone under MDM management, the
+managed configuration replaces the local one wholesale and the policy stops
+applying; the script warns when it detects that.
+
+Left enabled, a clone would download a full installer on every check and then fail
+to apply it (the bundle ID inside the official package no longer matches, so the
+swap is refused). That failure is why clones survive at all today, but it is not a
+guarantee — the cost of leaving it on is wasted bandwidth and a nagging UI, and the
+protection is incidental.
 
 The correct sequence is: let the original app update normally, then run
 `./clone-agent.sh --all`. The script is idempotent and safe to re-run at any time.
@@ -147,7 +178,8 @@ User data lives outside the bundle, so rebuilding preserves logins and history.
 ## How the two apps differ
 
 The same pipeline works for both — rewrite identity, patch the asar in place,
-sync the integrity hash, inject a wrapper, sign inside-out, rebuild from profile.
+sync the integrity hash, inject a wrapper, sign inside-out, run the adapter's
+post-install step, rebuild from profile.
 The substantive differences are isolated in `adapters/`:
 
 | | Claude | Codex |
@@ -156,10 +188,10 @@ The substantive differences are isolated in `adapters/`:
 | Main executable | `Claude` | `ChatGPT` |
 | Helper location | `Contents/Frameworks/*.app`, path derived from `CFBundleName` | `Codex Framework.framework/Versions/<chromium>/Helpers/` |
 | Helpers need renaming | **Yes** — otherwise `Unable to find helper app` | No, paths anchor to the framework name |
-| Data isolation | `--user-data-dir` only | `--user-data-dir` **plus** `CODEX_HOME` |
+| Data isolation | `--user-data-dir` only (`~/.claude` stays shared) | `--user-data-dir` **plus** `CODEX_HOME` |
 | Keychain isolation | ✅ possible (via asar `productName`) | ❌ not possible (names compiled into native code) |
 | Browser Use | Unchanged | ✅ via an OpenAI-signed `node_repl → codex → node` launch chain |
-| Auto-update | in-house Squirrel, no plist switch | Sparkle, disabled via `SUEnableAutomaticChecks` |
+| Auto-update | Squirrel, off via the `disableAutoUpdates` policy key | Sparkle, off via `CODEX_SPARKLE_ENABLED=false` |
 
 ### Codex keychain limitation
 
@@ -196,6 +228,7 @@ adapters/README.md                  adapter interface contract
 adapters/claude.sh                  Claude support
 adapters/codex.sh                   Codex support
 tools/patch-asar-productname.js     in-place productName rewrite inside app.asar
+tools/write-config-library.js       Claude's local-tier policy file (disables auto-update)
 tools/make-icon.sh                  png -> icns (crop, center, round, all sizes)
 tools/codex-cli-launcher            copied into a Codex clone; keeps an OpenAI-signed
 tools/codex-cli-launcher.cjs          Node parent above codex so Browser Use works
@@ -266,6 +299,11 @@ cron and editor task runners do not see them; nothing clears an ambient
 `ANTHROPIC_API_KEY` (which makes the Claude CLI bill per token and ignore your
 subscription) or an ambient `OPENAI_API_KEY`; and Codex's MCP OAuth tokens stay in
 the shared Keychain entry rather than the profile.
+
+`CLAUDE_CONFIG_DIR` is worth knowing about for a second reason: Claude Desktop runs
+its own bundled Claude Code, which reads `~/.claude` exactly like the CLI does. By
+default a clone, the original app and the CLI therefore all share one Claude Code
+config — see [Where a clone's data lives](#where-a-clones-data-lives).
 
 ---
 

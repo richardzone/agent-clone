@@ -343,6 +343,18 @@ ADAPTER="$ADAPTER_DIR/${APP_KIND}.sh"
 [[ -f "$ADAPTER" ]] || die "No adapter for '$APP_KIND' (available: ${${kinds[@]:t:r}})"
 source "$ADAPTER"
 
+# The engine calls every hook unconditionally within its target, so a missing one
+# is a fatal zsh "command not found" — and because most hooks run late, it would
+# strike after the bundle is copied and signed. Check the whole contract up front
+# instead: an adapter written against an older revision fails here, naming what to
+# add, with nothing modified yet.
+for _hook in a_preflight a_extra_plist a_rename_helpers a_wrapper_env a_sign_extra \
+             a_post_install a_notes a_cli_preflight a_cli_wrapper_env a_cli_exec a_cli_notes; do
+  (( $+functions[$_hook] )) ||
+    die "Adapter ${APP_KIND}.sh does not define ${_hook}().\n   All eleven hooks are required — write a no-op if there is nothing to do:\n     ${_hook}() { :; }\n   The contract is documented in adapters/README.md."
+done
+unset _hook
+
 : ${TARGET:=all}
 [[ "$TARGET" == all || "$TARGET" == app || "$TARGET" == cli ]] ||
   die "--target must be all, app, or cli (got '$TARGET')"
@@ -390,7 +402,13 @@ CLI_HOME_REAL="$(expand_home_path "$CLI_HOME")"
 
 : ${SRC:="$A_SOURCE_DEFAULT"}
 : ${DEST_DIR:="/Applications"}
-: ${BUNDLE_ID:="${A_BUNDLE_ID_BASE}.${${(L)NAME}//[^a-z0-9]/}"}
+# Replace the disallowed characters rather than deleting them. Deleting collapsed
+# every separator, so My-Claude, My_Claude and My.Claude all derived the same
+# identifier as MyClaude — different apps claiming one identity, and macOS keys TCC
+# permissions, the NSUserDefaults domain, Launch Services and the update-staging
+# directory off exactly that. A hyphen is valid in a bundle identifier.
+# Existing clones are unaffected: their profile stores P_BUNDLE_ID and it wins.
+: ${BUNDLE_ID:="${A_BUNDLE_ID_BASE}.${${(L)NAME}//[^a-z0-9]/-}"}
 # Note the literal $HOME: this string is written into the wrapper and expanded
 # there at runtime.
 : ${DATA_DIR:="\$HOME/Library/Application Support/${NAME}"}
@@ -401,6 +419,47 @@ APP="$DEST_DIR/${NAME}.app"
   die "Source app not found: $SRC\n   ${A_LABEL} may not be installed, or lives elsewhere — install it and retry, or pass --source with the real path."
 (( ! TARGET_APP )) || [[ "${APP:A}" != "${SRC:A}" ]] || die "Clone path equals the source app; that would overwrite the original"
 (( ! TARGET_APP )) || [[ -n "$ICON" ]] || die "The app/all target needs --icon on first run (.icns or .png)"
+
+# Preserving separators narrows the collisions but does not eliminate them —
+# My-Claude and My_Claude still both normalise to my-claude, and --bundle-id can be
+# pointed anywhere. Two clones sharing an identifier is not a cosmetic clash: macOS
+# keys TCC permissions, the preferences domain, Launch Services registration and the
+# updater's staging directory off it, so they stop being independent instances,
+# which is the whole point of this tool. Check the other profiles and refuse.
+# Sourcing happens in a subshell so the other profile's P_* cannot clobber ours.
+# Only meaningful for app targets: a cli-only profile installs no bundle.
+if (( TARGET_APP )); then
+  for _p in "$PROFILE_DIR"/*.conf; do
+    [[ "$_p" == "$PROFILE" ]] && continue
+    # `|| _other_id=""` is not belt-and-braces: if sourcing fails — a truncated file
+    # from an interrupted run, a bad permission bit — the subshell dies before the
+    # print, and under set -e that assignment would abort the whole script with no
+    # message at all, since stderr is discarded. One damaged profile would poison
+    # every future invocation. Treat it as "claims nothing" instead.
+    # The unset is load-bearing too: the engine already sourced its own profile, so
+    # without it a profile that sets no P_BUNDLE_ID would inherit ours and self-collide.
+    _other_id="$(unset P_BUNDLE_ID; source "$_p" 2>/dev/null; print -r -- "${P_BUNDLE_ID:-}")" || _other_id=""
+    if [[ -n "$_other_id" && "${(L)_other_id}" == "${(L)BUNDLE_ID}" ]]; then
+      die "Bundle ID '${BUNDLE_ID}' is already claimed by the clone '${${_p:t}:r}'.\n   Two clones sharing one identifier would share macOS permissions, preferences\n   and update state. Pick a different name, or pass --bundle-id explicitly."
+    fi
+  done
+
+  # Profiles are gitignored local state, so they can go missing while the .app they
+  # describe stays installed — a fresh checkout, a `git clean`, or deleting a profile
+  # to start over. The loop above would then find nothing and let a second clone claim
+  # the same identifier, which is the very bug this is meant to prevent. Ask the
+  # installed bundles directly as well. The path-based guard further down does not
+  # cover this: it only looks at our own target path, and the colliding clone lives at
+  # a different one.
+  for _app in "$DEST_DIR"/*.app; do
+    [[ "${_app:A}" == "${APP:A}" ]] && continue
+    _other_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$_app/Contents/Info.plist" 2>/dev/null || true)"
+    if [[ -n "$_other_id" && "${(L)_other_id}" == "${(L)BUNDLE_ID}" ]]; then
+      die "Bundle ID '${BUNDLE_ID}' is already used by ${_app}.\n   Two apps sharing one identifier would share macOS permissions, preferences and\n   update state. Pick a different name, or pass --bundle-id explicitly."
+    fi
+  done
+  unset _p _app _other_id
+fi
 
 # Step 2 rebuilds the clone with `rm -rf "$APP"`, so refuse to touch anything that
 # isn't ours: a slip like `./clone-agent.sh Slack --app claude` would otherwise delete
@@ -449,7 +508,7 @@ if (( TARGET_APP )); then
   info "App data   : $DATA_DIR"
   info "Icon       : ${ICON#$REPO_DIR/}"
   # Adapters depend on upstream invariants that preflight cannot test — most
-  # sharply the Browser Use process-chain contract (AGENTS.md §10), which can stop
+  # sharply the Browser Use process-chain contract (AGENTS.md §13), which can stop
   # being honoured with every structural check still passing. Recording the
   # version this profile was last built against at least turns that from silent
   # into noticed.
@@ -527,6 +586,11 @@ if (( DRY_RUN )); then
   (( TARGET_APP )) && info "  - Quit any running ${NAME}, then safely rebuild and re-sign ${APP}"
   (( TARGET_CLI )) && info "  - Install isolated CLI launcher ${CLI_LAUNCHER}"
   info "  - Write the unified profile ${PROFILE#$REPO_DIR/}"
+  # Show the expanded path: DATA_DIR still carries a literal $HOME here, and this is
+  # the one place a user checks where things will land before committing to a run.
+  # The adapter picks the exact subdirectory (Claude appends -3p, per its own Lf()),
+  # so name the base rather than implying this is the literal target.
+  (( TARGET_APP )) && info "  - Run the adapter's data-directory setup, based on ${DATA_DIR//\$HOME/$HOME}"
   exit 0
 fi
 
@@ -641,12 +705,6 @@ codesign --force --sign - "$APP"  >/dev/null 2>&1
 
 codesign --verify --deep --strict "$APP" || die "Signature verification failed"
 info "Signature OK"
-
-# ===========================================================================
-step "Refreshing Launch Services / icon cache"
-# ===========================================================================
-"/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister" -f "$APP"
-killall Dock 2>/dev/null || true
 fi
 
 # ==========================================================================
@@ -703,6 +761,11 @@ fi
 # ===========================================================================
 # Save the single profile used by both app and CLI targets.
 # ===========================================================================
+# Written before the post-install step, not after: every parameter it records is
+# already settled, and if post-install fails, the recovery advice is to re-run
+# `./clone-agent.sh <Name>` — which only works if the profile exists. Writing it
+# afterwards meant a first run that failed there sent the user to a command that
+# demanded --app and --icon all over again.
 mkdir -p "$PROFILE_DIR"
 icon_store="$ICON"
 [[ "$icon_store" == "$REPO_DIR/"* ]] && icon_store="${icon_store#$REPO_DIR/}"
@@ -725,6 +788,31 @@ icon_store="$ICON"
   # forward rather than blanking it.
   print "P_VERIFIED_SOURCE_VERSION=${(qq)${SRC_VERSION:-$P_VERIFIED_SOURCE_VERSION}}"
 } > "$PROFILE"
+
+if (( TARGET_APP )); then
+# ===========================================================================
+step "Post-install: adapter setup inside the data directory"
+# ===========================================================================
+# Everything in the app steps writes inside the .app; this writes next to it, in
+# the clone's own data directory. That directory survives rebuilds by design (which
+# is what keeps logins and history), so this has to be idempotent — Claude uses it
+# to drop in the policy file that disables auto-updates.
+# DATA_DIR holds a literal $HOME so it can be written into the wrapper verbatim;
+# expand it here, where a real path is needed. A --data-dir given as an absolute
+# path contains no $HOME and is passed through untouched. Global replace (//), so a
+# hand-edited profile with $HOME appearing more than once still resolves fully.
+# On failure, die rather than letting set -e drop out silently: the bundle is
+# already installed and signed at this point, so an unexplained abort would leave a
+# clone that looks finished but never got its adapter setup.
+a_post_install "$NAME" "${DATA_DIR//\$HOME/$HOME}" ||
+  die "Adapter post-install failed (see above).\n   ${APP} is already installed and signed, and right now it has NOT had its\n   adapter setup applied — for Claude that means auto-update is still live.\n   Do not launch it until this is fixed, then re-run: ./clone-agent.sh ${NAME}"
+
+# ===========================================================================
+step "Refreshing Launch Services / icon cache"
+# ===========================================================================
+"/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister" -f "$APP"
+killall Dock 2>/dev/null || true
+fi
 
 print -P "\n%F{green}Done.%f"
 if (( TARGET_APP )); then

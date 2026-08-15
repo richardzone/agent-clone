@@ -2,8 +2,9 @@
 
 `clone-agent.sh` is a generic engine. It manages a unified profile and dispatches
 its `app`, `cli`, or `all` target. For apps, the main line is copy the bundle →
-rewrite identity → patch the asar → install a wrapper → sign inside-out. For CLIs,
-it generates a profile launcher that selects the isolated agent home.
+rewrite identity → patch the asar → install a wrapper → sign inside-out → adapter
+post-install. For CLIs, it generates a profile launcher that selects the isolated
+agent home.
 **Everything app-specific lives in an adapter.**
 
 Supporting a new app means writing `<kind>.sh` in this directory and referring to
@@ -13,9 +14,12 @@ in the engine.
 Two implementations to copy from:
 
 - `claude.sh` — standard Electron layout (helpers under `Contents/Frameworks/`,
-  paths derived from `CFBundleName`)
+  paths derived from `CFBundleName`), plus the only `a_post_install` in the repo
 - `codex.sh` — Chromium-style layout (helpers inside the framework) plus an extra
-  environment-variable isolation layer
+  environment-variable isolation layer (`CODEX_HOME`)
+
+Both disable auto-update, from `a_wrapper_env` or `a_post_install` — never from
+`a_extra_plist`.
 
 ---
 
@@ -65,12 +69,17 @@ documentation:
 
 ## Functions
 
-**All ten must be defined** — the engine calls the target-relevant set. Write a no-op
-for the ones you don't need:
+**All eleven must be defined** — the engine calls the target-relevant set, and
+checks for every one of them up front (see "How adapters are loaded"). Write a
+no-op for the ones you don't need:
 
 ```zsh
 a_notes() { :; }
 ```
+
+The engine verifies all seven exist right after sourcing the adapter, before
+anything is written, and names the missing one. `a_post_install` is the newest and
+is what an adapter written against the earlier six-hook contract will be missing.
 
 Call order (numbers refer to the engine's steps):
 
@@ -81,10 +90,11 @@ Call order (numbers refer to the engine's steps):
 | 5/9 handle helpers | `a_rename_helpers` | clone app path, clone name |
 | 8/9 install wrapper | `a_wrapper_env` | clone name |
 | 9/9 re-sign (**before** the engine's generic loops) | `a_sign_extra` | clone app path |
+| Post-install, after the bundle is complete | `a_post_install` | clone name, **expanded** data dir |
 | After everything succeeds | `a_notes` | clone name |
 | CLI preflight, before any writes | `a_cli_preflight` | none |
 | CLI launcher generation | `a_cli_wrapper_env` | clone name |
-| CLI launcher generation | `a_cli_exec` | resolved absolute path to the vendor CLI |
+| CLI launcher generation | `a_cli_exec` | none — emit `exec "$agent_cli" …` |
 | After CLI succeeds | `a_cli_notes` | clone name |
 
 ### `a_preflight <src>`
@@ -104,7 +114,7 @@ continues to the end and returns the status of the last command.
 `a_cli_preflight` is called the same way (`a_cli_preflight || die ...`) and carries
 the same requirement.
 
-The other eight functions are called directly, so `set -e` applies normally: any
+The other nine functions are called directly, so `set -e` applies normally: any
 non-zero return inside them terminates the whole script — silently, since there is
 no `die` to print anything. Append `|| true` to commands that are expected to fail
 sometimes, and `|| die "..."` to ones whose failure actually matters. A bare
@@ -124,12 +134,15 @@ Apps whose helpers anchor to a framework name (like Codex) need no renaming, but
 
 ### `a_extra_plist <plist>`
 
-Write adapter-specific keys into the clone's `Info.plist`. The typical use is
-disabling auto-update (`codex.sh` sets Sparkle's `SUEnableAutomaticChecks` and
-`SUAutomaticallyUpdate` to false here).
+Write adapter-specific keys into the clone's `Info.plist`.
 
 `CFBundleName`, `CFBundleDisplayName`, `CFBundleIdentifier`, `CFBundleIconFile`
 and `CFBundleIconName` are already handled by the engine; don't repeat them.
+
+⚠️ **Do not reach for this to disable auto-update.** Both adapters are no-ops
+here, and Codex is a no-op *because* the plist route was tried and measured not to
+work: Sparkle reads `NSUserDefaults` first and `Info.plist` only as a fallback.
+See AGENTS.md.
 
 ### `a_wrapper_env <name>`
 
@@ -161,6 +174,21 @@ already signed. **Never sign with `codesign --deep`** — Apple deprecated it fo
 signing and it mismatches nested helper signatures. `--deep` is for verification
 only.
 
+### `a_post_install <name> <data-dir>`
+
+The one hook that writes **outside the .app**, into the clone's data directory.
+Use it for state the app reads from disk rather than from its bundle — `claude.sh`
+drops in the local-tier policy file that turns auto-updates off.
+
+Two things follow from where that directory lives:
+
+- **It survives rebuilds** (by design — that is what preserves logins and
+  history), so this hook **must be idempotent**. Merge into what is already there;
+  never write a file wholesale, or you will discard configuration the user set up
+  through the app's own UI.
+- **The path is passed expanded.** `DATA_DIR` carries a literal `$HOME` so it can
+  go into the wrapper verbatim; the engine expands it before calling you.
+
 ### `a_notes <name>`
 
 Printed to the user once everything succeeds. A good place for app-specific
@@ -177,10 +205,12 @@ already emitted `unset -m` for every glob in `A_CLI_ENV_NAMESPACES` by the time 
 runs, and that ordering is load-bearing, since these exports live inside those
 same namespaces.
 
-`a_cli_exec <resolved-path>` prints the final `exec` line and must forward `"$@"`.
-Use the path it is given rather than the bare command name: the launcher runs
-under `#!/bin/zsh -f`, so `PATH` may be whatever the caller had, and a shell
-function named after the vendor command must not be able to shadow it.
+`a_cli_exec` prints the final `exec` line and must forward `"$@"`. Emit
+`exec "$agent_cli" … "$@"`, never the bare command name: the engine has already
+written the lines that set `$agent_cli` to the path resolved at preflight, falling
+back to a `PATH` lookup if a runtime manager has since moved it. The launcher runs
+under `#!/bin/zsh -f`, so `PATH` is whatever the caller had, and a shell function
+named after the vendor command must not be able to shadow it.
 
 `a_cli_notes <name>` explains first-login and authentication behaviour. Mention
 that MCP servers inherit the cleared environment — that failure mode is not
@@ -225,5 +255,5 @@ re-sign → **actually launch it and confirm the processes are healthy**. A run 
 completes without errors proves nothing; the verification checklist in
 [../AGENTS.md](../AGENTS.md) has ready-to-use commands.
 
-Once it works by hand, slot each step into one of the ten functions above — that's
+Once it works by hand, slot each step into one of the eleven functions above — that's
 your adapter.
