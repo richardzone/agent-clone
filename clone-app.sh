@@ -295,12 +295,34 @@ APP="$DEST_DIR/${NAME}.app"
 # Sourcing happens in a subshell so the other profile's P_* cannot clobber ours.
 for _p in "$PROFILE_DIR"/*.conf; do
   [[ "$_p" == "$PROFILE" ]] && continue
-  _other_id="$(unset P_BUNDLE_ID; source "$_p" 2>/dev/null; print -r -- "${P_BUNDLE_ID:-}")"
-  if [[ -n "$_other_id" && "$_other_id" == "$BUNDLE_ID" ]]; then
+  # `|| _other_id=""` is not belt-and-braces: if sourcing fails — a truncated file
+  # from an interrupted run, a bad permission bit — the subshell dies before the
+  # print, and under set -e that assignment would abort the whole script with no
+  # message at all, since stderr is discarded. One damaged profile would poison
+  # every future invocation. Treat it as "claims nothing" instead.
+  # The unset is load-bearing too: the engine already sourced its own profile, so
+  # without it a profile that sets no P_BUNDLE_ID would inherit ours and self-collide.
+  _other_id="$(unset P_BUNDLE_ID; source "$_p" 2>/dev/null; print -r -- "${P_BUNDLE_ID:-}")" || _other_id=""
+  if [[ -n "$_other_id" && "${(L)_other_id}" == "${(L)BUNDLE_ID}" ]]; then
     die "Bundle ID '${BUNDLE_ID}' is already claimed by the clone '${${_p:t}:r}'.\n   Two clones sharing one identifier would share macOS permissions, preferences\n   and update state. Pick a different name, or pass --bundle-id explicitly."
   fi
 done
-unset _p _other_id
+
+# Profiles are gitignored local state, so they can go missing while the .app they
+# describe stays installed — a fresh checkout, a `git clean`, or deleting a profile
+# to start over. The loop above would then find nothing and let a second clone claim
+# the same identifier, which is the very bug this is meant to prevent. Ask the
+# installed bundles directly as well. The path-based guard further down does not
+# cover this: it only looks at our own target path, and the colliding clone lives at
+# a different one.
+for _app in "$DEST_DIR"/*.app; do
+  [[ "${_app:A}" == "${APP:A}" ]] && continue
+  _other_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$_app/Contents/Info.plist" 2>/dev/null || true)"
+  if [[ -n "$_other_id" && "${(L)_other_id}" == "${(L)BUNDLE_ID}" ]]; then
+    die "Bundle ID '${BUNDLE_ID}' is already used by ${_app}.\n   Two apps sharing one identifier would share macOS permissions, preferences and\n   update state. Pick a different name, or pass --bundle-id explicitly."
+  fi
+done
+unset _p _app _other_id
 
 # Step 2 rebuilds the clone with `rm -rf "$APP"`, so refuse to touch anything that
 # isn't ours: a slip like `./clone-app.sh Slack --app claude` would otherwise delete
