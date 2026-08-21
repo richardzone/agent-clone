@@ -112,9 +112,11 @@ Outside the app bundle — which is why rebuilding never loses logins or history
   the launcher, and vice versa
 - `~/.claude-<Name>` — Claude **CLI launcher** only: the `CLAUDE_CONFIG_DIR` this
   tool generates, holding that profile's sessions, `settings.json` and MCP config.
-  The login is *not* here — Claude Code keeps it in the keychain, under a service
-  name hashed from this directory, so the directory names the entry rather than
-  containing the credential. (Codex is the opposite: `auth.json` is a real file.)
+  The login is *usually* not here — Claude Code keeps it in the keychain, under a
+  service name hashed from this directory. But the store falls back to
+  `.credentials.json` in this directory when a keychain write fails, and deletes
+  the keychain entry when it does, so treat this directory as credential-bearing.
+  (Codex is simpler: `auth.json` is always a real file.)
 
 The **desktop** clone's `~/.claude` is deliberately *not* isolated. Claude Desktop
 runs its own bundled Claude Code, and that reads `~/.claude` — the same directory
