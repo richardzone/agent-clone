@@ -389,17 +389,18 @@ against real paths, and one wrong flag is a real run:
 This is the part to get right, because it is the part you will *execute* rather
 than merely obey. A safety rule whose escape hatch is unsafe is worse than none —
 it converts caution into confidence. Each claim below was checked against the
-engine, and two of the three entry points do **not** behave the way an obvious
-reading suggests.
+engine, and none of the three entry points behaves the way an obvious reading
+suggests.
 
-**Start from what a run writes, not from which flags exist.** Three destinations,
-and only two of them are redirectable:
+**Start from what a run writes, not from which flags exist.** Four destinations,
+and the one that matters most is redirected by nothing you can pass:
 
 | What the engine writes | What redirects it |
 |---|---|
 | the `.app` bundle | `--dest-dir` |
 | the CLI launcher and the agent home | a sandboxed `HOME` |
-| `$REPO_DIR/profiles/<Name>.conf` | **nothing — only which repo you invoke** |
+| Claude's policy file, `<data_dir>-3p/configLibrary` (app targets; Codex's `a_post_install` is a no-op) | a sandboxed `HOME`, or `--data-dir` |
+| `$REPO_DIR/profiles/<Name>.conf` — and, for a `.png` icon on a real run, the converted `$REPO_DIR/icons/<Name>.icns` | **nothing — only which repo you invoke** |
 
 The profile write is unguarded by target and unconditional: `mkdir -p "$PROFILE_DIR"`
 and `> "$PROFILE"` (`clone-agent.sh:733`, `:754`) run on every non-dry-run
@@ -408,25 +409,42 @@ convenience — it is the only thing standing between a test run and row 5 of th
 table above.** A sandboxed `HOME` alone never contains a run.
 
 ```zsh
-# rm -rf first: if the destination exists, cp -R nests inside it and every path
-# below then points at an empty directory that looks fine.
-rm -rf /tmp/sbx-repo /tmp/sbx-src
+# <repo> is the checkout that contains clone-agent.sh.
+# rm -rf first: if a destination exists, cp -R nests inside it and every path
+# below then points at an empty directory that looks fine. sbx-src is left alone
+# on purpose — it is inert input, and re-copying it costs ~800M.
+rm -rf /tmp/sbx-repo /tmp/sbx-home /tmp/sbx-apps
 mkdir -p /tmp/sbx-home /tmp/sbx-apps /tmp/sbx-src
 cp -R <repo> /tmp/sbx-repo
+rm -rf /tmp/sbx-repo/.git                        # not optional — see below
 find /tmp/sbx-repo/profiles -name '*.conf' -delete
-ls /tmp/sbx-repo/profiles          # must show example.conf.sample and nothing else
+[[ -d /tmp/sbx-src/Claude.app ]] ||
+  cp -R /Applications/Claude.app /tmp/sbx-src/   # only needed for an app target
+ls /tmp/sbx-repo/clone-agent.sh /tmp/sbx-repo/profiles
 ```
 
-Run that `ls` and look at it. `find -delete` reports success whether it deleted
-five profiles or looked in the wrong place, so the listing is the only evidence
-that the copy landed where you think it did. (`find` rather than a glob because
-`rm -f dir/*.conf` aborts the line under zsh when there is nothing to match, and
-the obvious repair — zsh's `(N)` qualifier — is a parse error under bash and
-silences this check in both.)
+**Deleting the copy's `.git` is not tidiness.** In a git worktree — which is how
+you should be working, per section 16 — `.git` is not a directory but a one-line
+file pointing at the real repository's `worktrees/<name>`. `cp -R` copies that
+pointer, so the "disposable" copy shares the original's HEAD, index and reflog,
+while `git rev-parse --show-toplevel` inside it reports `/tmp/sbx-repo` and makes
+it look self-contained. A `git checkout` or `git reset` in the sandbox then moves
+the **real** checkout's branch. That is section 16's incident, reached by
+following section 15.
+
+Run that final `ls` and look at it. `find -delete` does exit non-zero when the
+path is missing — but it exits **0** after deleting nothing when the path exists
+and is merely the wrong directory, which is exactly what a nested `cp -R`
+produces. The listing is the only evidence that the copy landed where you think
+it did, and naming `clone-agent.sh` in it also catches the case where `<repo>`
+was a checkout old enough to still call it `clone-app.sh`. (`find` rather than a
+glob because `rm -f dir/*.conf` aborts the line under zsh when nothing matches;
+the obvious repair — zsh's `(N)` qualifier — is a hard parse error under bash and
+a silent no-op under zsh, so neither deletes anything.)
 
 Deleting the profiles also disables the bundle-ID collision guard, which scans
-`profiles/*.conf` (`clone-agent.sh:452`); `--dest-dir` blinds the second one, which
-scans `$DEST_DIR` (`:465`). In a sandbox nothing will catch a name collision, so
+`profiles/*.conf` (`clone-agent.sh:446`); `--dest-dir` blinds the second one, which
+scans `$DEST_DIR` (`:468`). In a sandbox nothing will catch a name collision, so
 use a name that exists nowhere on the machine.
 
 **A `cli` target is the one you can actually run for real:**
@@ -436,16 +454,25 @@ HOME=/tmp/sbx-home /tmp/sbx-repo/clone-agent.sh SbxName --app claude --target cl
 ```
 
 It installs no bundle, never calls `lsregister`, and never restarts the Dock. Its
-launcher (`$HOME/.local/bin` by default, `--cli-bin-dir` overrides) and its agent
-home (`$HOME/.claude-<Name>`, `$HOME/.codex-<Name>`) are `$HOME`-relative. It still
-writes the profile into whichever repo you invoked, per the table above.
+launcher (`$HOME/.local/bin`) and its agent home (`$HOME/.claude-<Name>`,
+`$HOME/.codex-<Name>`) are `$HOME`-relative. It still writes the profile into
+whichever repo you invoked, per the table above.
+
+Two things about that run. **Leave `--cli-bin-dir` unset**: it takes an absolute
+path and is the one flag that puts the launcher outside a sandboxed `HOME`, on the
+one target you are otherwise allowed to run for real. And the profile it writes
+records the real defaults regardless of how sandboxed the run was —
+`P_SOURCE='/Applications/Claude.app'`, `P_DEST_DIR='/Applications'` — so it is
+inert only while `P_TARGET='cli'`. Never copy a sandbox profile into a real
+`profiles/`; you would be planting an `/Applications`-targeted entry that the next
+`--all` will honour.
 
 **Never reuse a name that exists in the real `profiles/`.** A named run rewrites
 `P_TARGET` with no warning (`clone-agent.sh:743`), so `<RealClone> --target cli`
 silently converts an app profile to cli-only, and the documented post-upgrade
 `--all` then stops rebuilding that desktop clone — on a tool whose clones cannot
 auto-update. `--all` refuses `--target` for exactly this reason, and its comment
-says so (`clone-agent.sh:279`); a named run has no such guard.
+says so (`clone-agent.sh:276-281`); a named run has no such guard.
 
 **An `app` target cannot be made safe. Preview it, and leave it a preview:**
 
@@ -453,8 +480,13 @@ says so (`clone-agent.sh:279`); a named run has no such guard.
 HOME=/tmp/sbx-home /tmp/sbx-repo/clone-agent.sh SbxName --dry-run \
   --app claude --target app --icon icons/example-claude.icns \
   --dest-dir /tmp/sbx-apps \
-  --source /tmp/sbx-src/Claude.app   # cp -R /Applications/Claude.app first
+  --source /tmp/sbx-src/Claude.app
 ```
+
+`--source` is not optional here, and do not "fix" a missing source by pointing it
+at `/Applications/Claude.app` — that is row 1 of the table above. The setup block
+populates `/tmp/sbx-src` for you; if the engine says `Source app not found`, the
+copy step did not run, and that is what to repair.
 
 `--dry-run` sits on the first line on purpose. A trailing `\` at end-of-input is
 **not** an error in zsh or bash — the command runs with the shorter argv and exits
@@ -547,8 +579,12 @@ pushed so nothing was lost, but a whole round of verification had silently run
 against the base revision instead of the branch under test, and every "not
 reproduced" in it was a false negative.
 
-If you need a different revision, use `git worktree add` or copy the repo
-elsewhere. Read history with `git show` and `git diff`, which need no checkout. In
+If you need a different revision, use `git worktree add`, or `git clone` the repo
+elsewhere. A plain `cp -R` of a worktree is **not** a detached copy: `.git` there
+is a one-line pointer at the original repository, so the copy shares its HEAD and
+index and a `checkout` inside it moves the real branch. Copy if you like, but
+delete the copy's `.git` (section 15's sandbox block does exactly this). Read
+history with `git show` and `git diff`, which need no checkout. In
 a shared or agent-driven checkout, treat `checkout`, `switch`, `restore`, `reset`,
 `stash`, `merge` and `rebase` as writes to someone else's working state — and
 `clean` as worse than all of them. `profiles/*.conf` is gitignored, so

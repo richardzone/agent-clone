@@ -55,7 +55,9 @@ further input. The order matters: `--all` re-copies from the *original* app, so
 rebuilding before the original has updated just reproduces the old version.
 
 Add `--dry-run` to any of the above to see exactly what would happen without
-touching a single file.
+installing or modifying an app, launcher or profile. (One exception: Codex's CLI
+preflight runs before the dry-run boundary, so it still creates a temp directory
+and asks the real `codex` binary a question. It changes nothing you own.)
 
 Icons given as `.png` are converted to `.icns` automatically (background cropped,
 centered, macOS corner radius applied); `.icns` is accepted directly. The two
