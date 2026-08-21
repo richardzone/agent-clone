@@ -722,9 +722,13 @@ env ANTHROPIC_PROFILE=x ANTHROPIC_BASE_URL=http://evil OPENAI_API_KEY=sk-x \
 # Expect: runs normally. Then confirm inside the CLI that it is the intended
 # account — the launcher cannot prove that for you.
 
-# 4. A dotfile cannot break it
-printf 'echo BANNER\n' >> ~/.zshenv && $CMD --version | head -1 && \
-  sed -i '' '$d' ~/.zshenv           # Expect: no BANNER in the output
+# 4. A dotfile cannot break it. Use a throwaway ZDOTDIR — zsh reads
+#    $ZDOTDIR/.zshenv when that is set, so the real ~/.zshenv is never edited.
+#    (Appending to the real one and trimming it afterwards is how you lose a
+#    line of it: the trim is skipped if the middle command fails.)
+zdot=$(mktemp -d); printf 'echo BANNER\n' > "$zdot/.zshenv"
+ZDOTDIR="$zdot" $CMD --version | head -1   # Expect: no BANNER in the output
+rm -rf "$zdot"
 ```
 
 ⚠️ **`open` will not restart a clone that is still running** — it just activates
