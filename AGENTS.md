@@ -381,8 +381,16 @@ against real paths, and one wrong flag is a real run:
 | `/Applications/Claude.app`, `/Applications/ChatGPT.app` | the **originals**. The engine only ever reads them, but they are the source of every clone; corrupting one costs a reinstall and takes every clone's rebuild path with it |
 | Any clone under `/Applications` (`RichardClaude.app`, `RichardCodex.app`, …) | signed-in instances, usually running |
 | `~/.claude`, `~/.codex` | the originals' CLI/agent state — and for `~/.claude`, deliberately *shared*: every desktop clone's bundled Claude Code reads it too (section 12), so the blast radius is every clone at once, not just the original |
-| `~/.claude-*`, `~/.codex-*`, `~/Library/Application Support/<clone>` (plus `<clone>-3p`, Claude only) | per-profile logins, sessions, history, MCP OAuth and policy files |
-| `profiles/*.conf` | not test fixtures. They are the only record of how a live clone was built |
+| `~/.claude-*`, `~/.codex-*`, `~/Library/Application Support/<clone>` (plus `<clone>-3p`, Claude only) | per-profile sessions, history, settings, MCP config and policy files — plus, for `~/.codex-*`, the login itself (`auth.json`). A Claude profile's login is not here; see the keychain row |
+| `~/.local/bin/<kind>-<lowercase-name>` | the generated CLI launcher (section 14). Overwriting one is how a profile loses its CLI, and `--force` will do it without asking |
+| Keychain: `"<Name> Safe Storage"` (Claude, per clone); `Codex Safe Storage`, `Codex Storage Key`, `Codex MCP Credentials` (Codex, **shared** by the original and every clone) | where Claude keeps its logins — desktop and CLI both. Destroying an entry logs that profile out with nothing on disk to restore from, and the Codex entries are shared, so damage there hits every clone at once |
+| `profiles/*.conf` | not test fixtures. They are the only record of how a live clone was built. Reading their names is fine; writing them is not |
+
+The second and fourth rows say `/Applications` and `~/Library/Application Support`
+because those are the defaults. `--dest-dir` / `P_DEST_DIR` and `--data-dir` /
+`P_DATA_DIR` move them, so the authoritative location for any given clone is its
+own profile — read that first. A clone also owns `~/Library/Logs/<Name>` and the
+`<bundle-id>` preferences domain, both of which the verification checklist reads.
 
 ### What can and cannot be sandboxed
 
@@ -392,80 +400,94 @@ it converts caution into confidence. Each claim below was checked against the
 engine, and none of the three entry points behaves the way an obvious reading
 suggests.
 
-**Start from what a run writes, not from which flags exist.** Four destinations,
+**Start from what a run writes, not from which flags exist.** Five destinations,
 and the one that matters most is redirected by nothing you can pass:
 
 | What the engine writes | What redirects it |
 |---|---|
 | the `.app` bundle | `--dest-dir` |
 | the CLI launcher and the agent home | a sandboxed `HOME` |
-| Claude's policy file, `<data_dir>-3p/configLibrary` (app targets; Codex's `a_post_install` is a no-op) | a sandboxed `HOME`, or `--data-dir` |
-| `$REPO_DIR/profiles/<Name>.conf` — and, for a `.png` icon on a real run, the converted `$REPO_DIR/icons/<Name>.icns` | **nothing — only which repo you invoke** |
+| Claude's `<data_dir>-3p/configLibrary` directory, on app targets (Codex's `a_post_install` is a no-op) | a sandboxed `HOME`, or `--data-dir` |
+| for a `.png` icon on a real run, the converted `.icns` — `${ICON:r}.icns`, i.e. beside the png, under whatever name the png has | `--icon` itself: a relative path is re-rooted to `$REPO_DIR` (`clone-agent.sh:490`) and lands in the invoked repo; an absolute one writes wherever it points |
+| `$REPO_DIR/profiles/<Name>.conf` | **nothing — only which repo you invoke** |
 
 The profile write is unguarded by target and unconditional: `mkdir -p "$PROFILE_DIR"`
 and `> "$PROFILE"` (`clone-agent.sh:733`, `:754`) run on every non-dry-run
-invocation, `cli` included, and `>` truncates. **So the repo copy is not a
-convenience — it is the only thing standing between a test run and row 5 of the
-table above.** A sandboxed `HOME` alone never contains a run.
+invocation, `cli` included, and `>` truncates. **So working from an extracted
+copy is not a convenience — it is the only thing standing between a test run and
+row 5 of the never-touch table.** A sandboxed `HOME` alone never contains a run.
 
 ```zsh
-# <repo> is the checkout that contains clone-agent.sh.
-# rm -rf first: if a destination exists, cp -R nests inside it and every path
-# below then points at an empty directory that looks fine. sbx-src is left alone
-# on purpose — it is inert input, and re-copying it costs ~800M.
-rm -rf /tmp/sbx-repo /tmp/sbx-home /tmp/sbx-apps
-mkdir -p /tmp/sbx-home /tmp/sbx-apps /tmp/sbx-src
-cp -R <repo> /tmp/sbx-repo
-rm -rf /tmp/sbx-repo/.git                        # not optional — see below
-find /tmp/sbx-repo/profiles -name '*.conf' -delete
-[[ -d /tmp/sbx-src/Claude.app ]] ||
-  cp -R /Applications/Claude.app /tmp/sbx-src/   # only needed for an app target
-ls /tmp/sbx-repo/clone-agent.sh /tmp/sbx-repo/profiles
+SBX="$(mktemp -d)"                       # not a fixed /tmp name — see below
+git -C <repo> archive <rev> | tar -x -C "$SBX"
+mkdir -p "$SBX/home" "$SBX/apps"
+ls "$SBX/clone-agent.sh" "$SBX/profiles"
 ```
 
-**Deleting the copy's `.git` is not tidiness.** In a git worktree — which is how
-you should be working, per section 16 — `.git` is not a directory but a one-line
-file pointing at the real repository's `worktrees/<name>`. `cp -R` copies that
-pointer, so the "disposable" copy shares the original's HEAD, index and reflog,
-while `git rev-parse --show-toplevel` inside it reports `/tmp/sbx-repo` and makes
-it look self-contained. A `git checkout` or `git reset` in the sandbox then moves
-the **real** checkout's branch. That is section 16's incident, reached by
-following section 15.
+**`git archive` rather than `cp -R`, for four reasons at once.** It emits the
+tracked contents of one named revision, so: there is no `.git` in the result;
+`profiles/*.conf` are gitignored and therefore absent without a deletion step;
+`<rev>` is explicit, where `<repo>` alone silently gives you whatever branch that
+checkout happens to be on; and re-running into a fresh `mktemp -d` cannot nest
+inside a previous attempt.
 
-Run that final `ls` and look at it. `find -delete` does exit non-zero when the
-path is missing — but it exits **0** after deleting nothing when the path exists
-and is merely the wrong directory, which is exactly what a nested `cp -R`
-produces. The listing is the only evidence that the copy landed where you think
-it did, and naming `clone-agent.sh` in it also catches the case where `<repo>`
-was a checkout old enough to still call it `clone-app.sh`. (`find` rather than a
-glob because `rm -f dir/*.conf` aborts the line under zsh when nothing matches;
-the obvious repair — zsh's `(N)` qualifier — is a hard parse error under bash and
-a silent no-op under zsh, so neither deletes anything.)
+The `.git` part is not tidiness. In a git worktree — which is how you should be
+working, per section 16 — `.git` is not a directory but a one-line file pointing
+at the real repository's `worktrees/<name>`, and this repo keeps its worktrees
+*inside itself* under `.claude/worktrees/`. A `cp -R` copies the top-level pointer
+and every nested one, all still armed, while `git rev-parse --show-toplevel`
+inside the copy answers with the copy and makes it look self-contained. A `git
+checkout` there moves the **real** checkout's branch. That is section 16's
+incident, reached by following section 15.
 
-Deleting the profiles also disables the bundle-ID collision guard, which scans
-`profiles/*.conf` (`clone-agent.sh:446`); `--dest-dir` blinds the second one, which
+**Use a fresh `mktemp -d`, not `/tmp/sbx-*` or any other fixed path.** This repo
+is explicitly agent-driven and currently has six worktrees; two agents following
+the same fixed-path recipe will `rm -rf` each other's sandbox mid-run. That is not
+hypothetical — it happened during the review of this section, and the losing agent
+only noticed because a profile it never created turned up in its results.
+
+Run that `ls` and look at it. It is the evidence that the extract landed where you
+think it did, and naming `clone-agent.sh` also catches a `<rev>` old enough to
+still call the engine `clone-app.sh`.
+
+Extracting a revision also means the bundle-ID collision guard has nothing to
+scan: it reads `profiles/*.conf` (`clone-agent.sh:446`), which are gitignored and
+so were never in the archive, and `--dest-dir` blinds the second guard, which
 scans `$DEST_DIR` (`:468`). In a sandbox nothing will catch a name collision, so
-use a name that exists nowhere on the machine.
+use a name that exists nowhere on the machine — listing the real `profiles/`
+filenames is a read, which row 5 permits; it is writing them the row forbids.
 
-**A `cli` target is the one you can actually run for real:**
+**Take a baseline even though you are sandboxed.** The snapshot procedure below is
+written for the case where the maintainer granted permission, but the reason to
+run it here is different and just as good: both clones are live and writing to
+disk continuously, so mtimes under `~/.codex*` and `~/Library/Application Support`
+move on their own. Without a before-picture you cannot tell their ordinary churn
+from something you did, and "I don't think I touched it" is not an answer.
+
+**A `cli` target is the one you can actually run for real.** Three things to know
+before you run it, not after:
+
+- **Leave `--cli-bin-dir` unset.** It takes an absolute path and is the one flag
+  that puts the launcher outside a sandboxed `HOME`, on the one target you are
+  otherwise allowed to run for real.
+- **Prefer `--app claude`.** Codex's `a_cli_preflight` executes the real vendor
+  `codex` binary above the dry-run boundary (see below); Claude's is a no-op
+  (`adapters/claude.sh`, `a_cli_preflight() { :; }`). If you must test Codex,
+  know that you are running the maintainer's signed-in CLI.
+- **The profile it writes records the real defaults** regardless of how sandboxed
+  the run was — `P_SOURCE='/Applications/Claude.app'`,
+  `P_DEST_DIR='/Applications'` — so it is inert only while `P_TARGET='cli'`.
+  Never copy a sandbox profile into a real `profiles/`; you would be planting an
+  `/Applications`-targeted entry that the next `--all` will honour.
 
 ```zsh
-HOME=/tmp/sbx-home /tmp/sbx-repo/clone-agent.sh SbxName --app claude --target cli
+HOME="$SBX/home" "$SBX/clone-agent.sh" SbxName --app claude --target cli
 ```
 
 It installs no bundle, never calls `lsregister`, and never restarts the Dock. Its
-launcher (`$HOME/.local/bin`) and its agent home (`$HOME/.claude-<Name>`,
-`$HOME/.codex-<Name>`) are `$HOME`-relative. It still writes the profile into
-whichever repo you invoked, per the table above.
-
-Two things about that run. **Leave `--cli-bin-dir` unset**: it takes an absolute
-path and is the one flag that puts the launcher outside a sandboxed `HOME`, on the
-one target you are otherwise allowed to run for real. And the profile it writes
-records the real defaults regardless of how sandboxed the run was —
-`P_SOURCE='/Applications/Claude.app'`, `P_DEST_DIR='/Applications'` — so it is
-inert only while `P_TARGET='cli'`. Never copy a sandbox profile into a real
-`profiles/`; you would be planting an `/Applications`-targeted entry that the next
-`--all` will honour.
+launcher (`$HOME/.local/bin/<kind>-<lowercase-name>`) and its agent home
+(`$HOME/.claude-<Name>`, `$HOME/.codex-<Name>`) are `$HOME`-relative. It still
+writes the profile into whichever repo you invoked, per the table above.
 
 **Never reuse a name that exists in the real `profiles/`.** A named run rewrites
 `P_TARGET` with no warning (`clone-agent.sh:743`), so `<RealClone> --target cli`
@@ -477,16 +499,17 @@ says so (`clone-agent.sh:276-281`); a named run has no such guard.
 **An `app` target cannot be made safe. Preview it, and leave it a preview:**
 
 ```zsh
-HOME=/tmp/sbx-home /tmp/sbx-repo/clone-agent.sh SbxName --dry-run \
+cp -R /Applications/Claude.app "$SBX/src-app"      # ~800M; app targets only
+HOME="$SBX/home" "$SBX/clone-agent.sh" SbxName --dry-run \
   --app claude --target app --icon icons/example-claude.icns \
-  --dest-dir /tmp/sbx-apps \
-  --source /tmp/sbx-src/Claude.app
+  --dest-dir "$SBX/apps" \
+  --source "$SBX/src-app"
 ```
 
-`--source` is not optional here, and do not "fix" a missing source by pointing it
-at `/Applications/Claude.app` — that is row 1 of the table above. The setup block
-populates `/tmp/sbx-src` for you; if the engine says `Source app not found`, the
-copy step did not run, and that is what to repair.
+The copy is the first line because `--source` is not optional here, and the way
+that goes wrong is specific: if it is missing the engine says `Source app not
+found` and its own advice names `/Applications/Claude.app`, which is row 1 of the
+table above. Repair the copy, never the flag. A `cli` target needs none of this.
 
 `--dry-run` sits on the first line on purpose. A trailing `\` at end-of-input is
 **not** an error in zsh or bash — the command runs with the shorter argv and exits
@@ -543,34 +566,39 @@ Dock`, however carefully `HOME` was redirected. Test the interactive flow with
 That is the only thing that lifts this, and it covers the goal rather than the
 collateral, so:
 
-- Snapshot what the target you chose actually writes, not a generic list — an
-  item that cannot change is a green check that means nothing. For **`cli`**:
-  the agent home's mode and contents (`chmod 700 "$CLI_HOME_REAL"` is the only
-  directory mode the engine ever changes, and it is applied to an existing
-  `~/.claude-<Name>` / `~/.codex-<Name>` unconditionally), its session count, and
-  for Codex `auth.json`'s size and mtime. For **`app`**: the profile checksum, the
-  bundle's mtime, and `~/Library/Application Support/<Name>-3p/configLibrary` —
-  Claude's `a_post_install` writes it, and it is the app target's only `$HOME` side
-  effect. Compare afterwards and say plainly that they match.
-- Where a Claude profile keeps its login and sessions depends on the target, and
-  the two answers are different directories. A **CLI** profile has its own
-  `CLAUDE_CONFIG_DIR`, so both live in `~/.claude-<Name>` — snapshot that, exactly
-  as you would Codex's `auth.json`. A **desktop** clone deliberately shares
-  `~/.claude` for sessions (section 12) and keeps its login in the keychain, which
-  cannot be snapshotted at all, so the data directory is the only proxy available.
+- Snapshot two lists, not one, or the comparison is meaningless. **Collateral
+  that must not change**: the agent home's *contents* and session count, Codex's
+  `auth.json` size and mtime, the keychain service names, every other profile and
+  bundle. **Artifacts this run rewrites**, which you record only so you can tell a
+  expected change from a surprise: for `cli`, the agent home's *mode*
+  (`chmod 700 "$CLI_HOME_REAL"` is applied unconditionally, so a 755 agent home
+  *will* become 700); for `app`, the bundle's mtime and, on Claude, the
+  `<data_dir>-3p/configLibrary` directory (`_meta.json` plus a `<uuid>.json`,
+  merged in place, so compare content rather than mtime — and Codex has no such
+  write at all, its `a_post_install` is a no-op). Afterwards, say plainly that the
+  first list matches. Do not say it about the second; it cannot.
+- **A Claude login is in the keychain — for both targets.** `~/.claude-<Name>`
+  holds a CLI profile's sessions, `settings.json` and MCP config, but not its
+  credential: Claude Code suffixes its keychain service name with a hash of the
+  secure-storage directory, falling back to `CLAUDE_CONFIG_DIR`, so the login is a
+  keychain entry that the config dir merely *names*. Only Codex keeps a login as a
+  file (`$CODEX_HOME/auth.json`). Snapshot the entries by service name — the
+  verification checklist below already does this, non-prompting, with
+  `security dump-keychain … | grep '"svce"'`. Only the secret values are
+  unreadable; their existence is not.
 - Work from a copy of the profile in a **different checkout**, not the
   maintainer's. The engine always writes back to `$REPO_DIR/profiles/<Name>.conf`,
   so a subdirectory of their checkout is not far enough away.
-- Prefer the narrowest target — which here means `app`, the opposite of the
-  sandbox advice above, and for the same reason: there the agent home was a
-  disposable `/tmp` one, here it is the maintainer's. `--target app` never touches
-  `~/.claude-<Name>` or `~/.codex-<Name>`; `all` would `mkdir` and `chmod` a
-  directory holding a live credential file. (An app target does still write under
-  `$HOME` — Claude's `a_post_install` drops its policy file beside the data
-  directory.)
-- Ask before killing anything. The engine's `pkill -f "$APP"` is silent and
-  immediate, a desktop agent may be mid-session, and any app target also runs
-  `killall Dock`.
+- Prefer the narrowest target that reaches the goal. If `cli` will do, use `cli`
+  — an `app` target is the widest thing you can run on this machine, since it
+  alone runs `pkill`, `rm -rf`, `lsregister` and `killall Dock`. Between `app` and
+  `all`, prefer `app`: it never touches `~/.claude-<Name>` or `~/.codex-<Name>`,
+  while `all` would `mkdir` and `chmod` a directory holding live credentials.
+- Ask before killing anything, and do not assume the kill worked. `pkill -f
+  "$APP"` is silent, and it is subject to the same refusal a manual `pkill` gets
+  (see "Quitting a running clone" below), so the usual outcome is not a clean
+  stop but a session still running against a bundle that has just been replaced.
+  Never `kill -9` your way out of that. Any app target also runs `killall Dock`.
 
 ## 16. Do not change the working tree's git state while others are reading it
 
@@ -590,6 +618,12 @@ a shared or agent-driven checkout, treat `checkout`, `switch`, `restore`, `reset
 `clean` as worse than all of them. `profiles/*.conf` is gitignored, so
 `git clean -fdx` destroys the only record of how a live clone was built, and
 unlike a branch switch it cannot be undone by switching back.
+
+**Running the engine inside a shared checkout is a write too**, and the likelier
+one. Every non-dry-run invocation writes `profiles/<Name>.conf` there — invisible
+to `git status`, because those are gitignored — and a `.png` icon overwrites
+`${ICON:r}.icns`, which for this repo's own `icons/example-claude.png` is a
+*tracked* file. Run it from the section 15 sandbox, never from someone's checkout.
 
 ---
 
@@ -749,8 +783,11 @@ Electron's FATAL message says directly whether a helper is missing or the
 integrity check failed.
 
 Use `--dry-run` while iterating. It runs every read-only check — argument
-parsing, profile resolution, adapter preflight — and stops before the first write,
-so you can validate a change without installing anything.
+parsing, profile resolution, adapter preflight — and stops before the first write
+to the clone's own artifacts, so you can validate a change without installing
+anything. One exception, per section 15: Codex's `a_cli_preflight` runs above the
+boundary, so it still creates a temp directory and executes the real vendor
+binary.
 
 ---
 

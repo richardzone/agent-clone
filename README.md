@@ -111,7 +111,10 @@ Outside the app bundle — which is why rebuilding never loses logins or history
   keychain entry. So an MCP server authorized from the desktop is not visible to
   the launcher, and vice versa
 - `~/.claude-<Name>` — Claude **CLI launcher** only: the `CLAUDE_CONFIG_DIR` this
-  tool generates, holding that profile's login, `settings.json` and MCP config
+  tool generates, holding that profile's sessions, `settings.json` and MCP config.
+  The login is *not* here — Claude Code keeps it in the keychain, under a service
+  name hashed from this directory, so the directory names the entry rather than
+  containing the credential. (Codex is the opposite: `auth.json` is a real file.)
 
 The **desktop** clone's `~/.claude` is deliberately *not* isolated. Claude Desktop
 runs its own bundled Claude Code, and that reads `~/.claude` — the same directory
