@@ -12,7 +12,7 @@ anything under `clone-agent.sh`, `adapters/`, or `tools/`.
 > **Read section 15 before you run anything.** The rest of this file is about
 > writing correct code; section 15 is about not destroying the maintainer's live
 > apps and logins while you test it. Its cost is unrecoverable rather than a
-> wasted rebuild — as is section 12's, the other one-way change described here.
+> wasted rebuild — as are section 12's one-way split and section 16's `git clean`.
 
 ---
 
@@ -392,51 +392,103 @@ it converts caution into confidence. Each claim below was checked against the
 engine, and two of the three entry points do **not** behave the way an obvious
 reading suggests.
 
-**A direct named run is containable**, but not by `--dest-dir` alone — and an
-`app` target is never *fully* contained:
+**Start from what a run writes, not from which flags exist.** Three destinations,
+and only two of them are redirectable:
+
+| What the engine writes | What redirects it |
+|---|---|
+| the `.app` bundle | `--dest-dir` |
+| the CLI launcher and the agent home | a sandboxed `HOME` |
+| `$REPO_DIR/profiles/<Name>.conf` | **nothing — only which repo you invoke** |
+
+The profile write is unguarded by target and unconditional: `mkdir -p "$PROFILE_DIR"`
+and `> "$PROFILE"` (`clone-agent.sh:733`, `:754`) run on every non-dry-run
+invocation, `cli` included, and `>` truncates. **So the repo copy is not a
+convenience — it is the only thing standing between a test run and row 5 of the
+table above.** A sandboxed `HOME` alone never contains a run.
 
 ```zsh
+# rm -rf first: if the destination exists, cp -R nests inside it and every path
+# below then points at an empty directory that looks fine.
+rm -rf /tmp/sbx-repo /tmp/sbx-src
 mkdir -p /tmp/sbx-home /tmp/sbx-apps /tmp/sbx-src
-cp -R <repo> /tmp/sbx-repo && rm -f /tmp/sbx-repo/profiles/*.conf(N)  # see below
-cp -R /Applications/Claude.app /tmp/sbx-src/                          # see below
-HOME=/tmp/sbx-home /tmp/sbx-repo/clone-agent.sh SbxName \
-  --app claude --target app --icon icons/example-claude.icns \
-  --dest-dir /tmp/sbx-apps \
-  --source /tmp/sbx-src/Claude.app \
-  --dry-run
+cp -R <repo> /tmp/sbx-repo
+find /tmp/sbx-repo/profiles -name '*.conf' -delete
+ls /tmp/sbx-repo/profiles          # must show example.conf.sample and nothing else
 ```
 
-`--dest-dir` covers the bundle the engine writes, and a sandboxed `HOME` covers
-per-profile state — but **the source app is neither**. `SRC` falls back to the
-adapter's absolute `A_SOURCE_DEFAULT` (`/Applications/Claude.app`,
-`/Applications/ChatGPT.app`), so without `--source` a run reads and `cp -R`s the
-real original. That is read-only and will not corrupt anything, but it is a real
-path and it is row 1 of the table above. Copying it once, as above, pays the
-gigabyte a single time rather than on every run — it does not avoid it.
+Run that `ls` and look at it. `find -delete` reports success whether it deleted
+five profiles or looked in the wrong place, so the listing is the only evidence
+that the copy landed where you think it did. (`find` rather than a glob because
+`rm -f dir/*.conf` aborts the line under zsh when there is nothing to match, and
+the obvious repair — zsh's `(N)` qualifier — is a parse error under bash and
+silences this check in both.)
 
-**Some things no flag can redirect.** The list is open; these are the ones that
-bite:
+Deleting the profiles also disables the bundle-ID collision guard, which scans
+`profiles/*.conf` (`clone-agent.sh:452`); `--dest-dir` blinds the second one, which
+scans `$DEST_DIR` (`:465`). In a sandbox nothing will catch a name collision, so
+use a name that exists nowhere on the machine.
 
-- `lsregister -f "$APP"` registers the clone in the real Launch Services database,
-  so a `/tmp` bundle leaves a stale entry behind once `/tmp` is cleaned.
-- `killall Dock` restarts the maintainer's Dock, silently, mid-session.
+**A `cli` target is the one you can actually run for real:**
+
+```zsh
+HOME=/tmp/sbx-home /tmp/sbx-repo/clone-agent.sh SbxName --app claude --target cli
+```
+
+It installs no bundle, never calls `lsregister`, and never restarts the Dock. Its
+launcher (`$HOME/.local/bin` by default, `--cli-bin-dir` overrides) and its agent
+home (`$HOME/.claude-<Name>`, `$HOME/.codex-<Name>`) are `$HOME`-relative. It still
+writes the profile into whichever repo you invoked, per the table above.
+
+**Never reuse a name that exists in the real `profiles/`.** A named run rewrites
+`P_TARGET` with no warning (`clone-agent.sh:743`), so `<RealClone> --target cli`
+silently converts an app profile to cli-only, and the documented post-upgrade
+`--all` then stops rebuilding that desktop clone — on a tool whose clones cannot
+auto-update. `--all` refuses `--target` for exactly this reason, and its comment
+says so (`clone-agent.sh:279`); a named run has no such guard.
+
+**An `app` target cannot be made safe. Preview it, and leave it a preview:**
+
+```zsh
+HOME=/tmp/sbx-home /tmp/sbx-repo/clone-agent.sh SbxName --dry-run \
+  --app claude --target app --icon icons/example-claude.icns \
+  --dest-dir /tmp/sbx-apps \
+  --source /tmp/sbx-src/Claude.app   # cp -R /Applications/Claude.app first
+```
+
+`--dry-run` sits on the first line on purpose. A trailing `\` at end-of-input is
+**not** an error in zsh or bash — the command runs with the shorter argv and exits
+0 — so if `--dry-run` were last, every way of losing the tail of that block (a
+truncated paste, a scroll boundary, an edit) would silently convert the preview
+into a real run. First, the same truncation costs containment flags while the
+preview survives.
+
+That is damage control, not safety. This section opens by saying not to rely on
+`--dry-run`, and that stands here: it is one argv token, and past it the engine
+runs `lsregister -f "$APP"` and `killall Dock` (`clone-agent.sh:828-829`), which
+**no flag redirects** — a `/tmp` bundle gets registered in the real Launch Services
+database and the maintainer's Dock restarts mid-session. `--dry-run`'s own summary
+of what it "would go on to" lists neither, so previewing will not warn you either.
+Do not convert this block into a real run.
+
+**Some things no flag redirects.** The list is open; these are the ones that bite:
+
+- `lsregister -f "$APP"` and `killall Dock`, above — `app`/`all` targets only, past
+  the dry-run boundary.
 - `PROFILE_DIR` is `$REPO_DIR/profiles`, so the copied repo *is* the profile store.
-- On CLI targets only, the preflight resolves the vendor command with `whence -p`
-  against the ambient `PATH`, not the sandboxed `HOME`.
+- On `cli` targets, the preflight resolves the vendor command with `whence -p`
+  against the ambient `PATH` and bakes that absolute path into the launcher.
+- `TMPDIR`: Codex's `a_cli_preflight` (`adapters/codex.sh`) creates a temp dir and
+  executes the real vendor `codex` binary — and it runs at `clone-agent.sh:578`,
+  *above* the dry-run boundary, so `--dry-run` does not suppress it.
 
-The first two are why the recipe ends in `--dry-run`. They run last, only on an
-`app` or `all` target, and past the dry-run boundary — and `--dry-run`'s own
-summary of what it "would go on to" does not list them, so previewing will not
-warn you either. **`--target cli` is the only fully contained target**: its
-launcher and agent home are both `$HOME`-relative (`$HOME/.local/bin`,
-`$HOME/.claude-<Name>`), so a sandboxed `HOME` really does hold the whole run.
-
-**`cp -R` of the repo carries the maintainer's real profiles with it.**
-`profiles/*.conf` is gitignored, so `git clone` omits them and `cp -R` — the plain
-reading of "copy the repo" — does not. Delete them in the copy before running
-anything, or the next point becomes a live-fire exercise. (The `(N)` above is zsh's
-null-glob qualifier; without it, a copy that has no profiles aborts that line with
-`no matches found`.)
+**The source app is neither `$HOME`- nor `--dest-dir`-relative.** `SRC` falls back
+to the adapter's absolute `A_SOURCE_DEFAULT` (`/Applications/Claude.app`,
+`/Applications/ChatGPT.app`), so without `--source` a run reads and preflights the
+real original — read-only, so nothing is corrupted, but it is row 1 of the table
+above. Under `--dry-run` the engine never copies the source anyway
+(`clone-agent.sh:623` is past the boundary), so `--source` buys provenance rather
+than time; it is a real run that would pay the gigabyte.
 
 **`--all` cannot be sandboxed by flags at all.** It accepts `--dest-dir` and
 `--source` and then silently ignores them: the child invocation forwards only the
@@ -452,26 +504,28 @@ with only name/app/target/icon — plus `--dry-run`, which *is* forwarded. `DEST
 therefore falls back to `/Applications` and `SRC` to the real original, so an
 `--init` run with an `app` or `all` target installs a real bundle and runs `killall
 Dock`, however carefully `HOME` was redirected. Test the interactive flow with
-`--dry-run`, or exercise the same code path through the explicit named form
-above.
+`--dry-run`, or exercise the same code path through the explicit named form above.
 
 ### If the maintainer explicitly grants permission
 
 That is the only thing that lifts this, and it covers the goal rather than the
 collateral, so:
 
-- Snapshot first: profile file checksum, the agent home's mode, session count,
-  and — for Codex — `auth.json` size and mtime. The agent home is the mode that
-  matters: `chmod 700 "$CLI_HOME_REAL"` is the only directory mode the engine ever
-  changes, and it is applied to an existing `~/.claude-<Name>` / `~/.codex-<Name>`
-  unconditionally. Count sessions wherever that profile actually keeps them — under
-  the agent home for Codex, but under the *shared* `~/.claude` for Claude, which is
-  row 3 of the table above. Compare afterwards and say plainly that they match.
-- A Claude profile has no `auth.json`, and where its login lives depends on the
-  target. The **desktop** clone's is in the keychain, which cannot be snapshotted
-  at all, so the data directory is the only available proxy. A **CLI** profile's is
-  on disk in `~/.claude-<Name>` — snapshot that directly, exactly as you would
-  Codex's `auth.json`.
+- Snapshot what the target you chose actually writes, not a generic list — an
+  item that cannot change is a green check that means nothing. For **`cli`**:
+  the agent home's mode and contents (`chmod 700 "$CLI_HOME_REAL"` is the only
+  directory mode the engine ever changes, and it is applied to an existing
+  `~/.claude-<Name>` / `~/.codex-<Name>` unconditionally), its session count, and
+  for Codex `auth.json`'s size and mtime. For **`app`**: the profile checksum, the
+  bundle's mtime, and `~/Library/Application Support/<Name>-3p/configLibrary` —
+  Claude's `a_post_install` writes it, and it is the app target's only `$HOME` side
+  effect. Compare afterwards and say plainly that they match.
+- Where a Claude profile keeps its login and sessions depends on the target, and
+  the two answers are different directories. A **CLI** profile has its own
+  `CLAUDE_CONFIG_DIR`, so both live in `~/.claude-<Name>` — snapshot that, exactly
+  as you would Codex's `auth.json`. A **desktop** clone deliberately shares
+  `~/.claude` for sessions (section 12) and keeps its login in the keychain, which
+  cannot be snapshotted at all, so the data directory is the only proxy available.
 - Work from a copy of the profile in a **different checkout**, not the
   maintainer's. The engine always writes back to `$REPO_DIR/profiles/<Name>.conf`,
   so a subdirectory of their checkout is not far enough away.
