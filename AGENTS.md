@@ -380,7 +380,7 @@ against real paths, and one wrong flag is a real run:
 |---|---|
 | `/Applications/Claude.app`, `/Applications/ChatGPT.app` | the **originals**. The engine only ever reads them, but they are the source of every clone; corrupting one costs a reinstall and takes every clone's rebuild path with it |
 | Any clone under `/Applications` (`RichardClaude.app`, `RichardCodex.app`, …) | signed-in instances, usually running |
-| `~/.claude`, `~/.codex` | the originals' CLI/agent state — and for `~/.claude`, deliberately *shared*: every desktop clone's bundled Claude Code reads it too (section 12), so the blast radius is every clone at once, not just the original |
+| `~/.claude`, `~/.codex` | the originals' CLI/agent state, including `~/.claude/.credentials.json` whenever Claude Code has fallen back to it — and for `~/.claude`, deliberately *shared*: every desktop clone's bundled Claude Code reads it too (section 12), so the blast radius is every clone at once, not just the original |
 | `~/.claude-*`, `~/.codex-*`, `~/Library/Application Support/<clone>` (plus `<clone>-3p`, Claude only) | per-profile logins, sessions, history, settings, MCP config and policy files. `~/.codex-*` always holds the login (`auth.json`); `~/.claude-*` holds it whenever Claude Code has fallen back to `.credentials.json` — see the keychain row |
 | `~/.local/bin/<kind>-<lowercase-name>` | the generated CLI launcher (section 14). Overwriting one is how a profile loses its CLI, and `--force` will do it without asking |
 | Keychain: `"<Name> Safe Storage"` (Claude **desktop**, per clone — Chromium's safeStorage); `Claude Code…-<hash>` (Claude **CLI**, keyed by config dir); `Codex Safe Storage`, `Codex Storage Key`, `Codex MCP Credentials` (Codex, **shared** by the original and every clone) | where the logins are. The desktop entry is the *encryption key* for the blob under `~/Library/Application Support/<clone>`, so losing it logs that profile out even though the blob survives. The Codex entries are shared, so damage there hits every clone at once |
@@ -419,22 +419,27 @@ the `profiles/*.conf` row of the never-touch table.** A sandboxed `HOME` alone
 never contains a run.
 
 ```zsh
+cd <your own checkout>                   # the one holding the edits you want to test
+git status --porcelain                   # must print nothing — see below
+SHA="$(git rev-parse --verify HEAD^{commit})"   # record it; report what you tested
 SBX="$(mktemp -d)"                       # not a fixed /tmp name — see below
-git -C <repo> status --porcelain         # must be empty — see below
-git -C <repo> rev-parse --verify <rev>   # record this; do NOT pass HEAD
-git -C <repo> archive <rev> | tar -x -C "$SBX"
+git archive "$SHA" | tar -x -C "$SBX"
 mkdir -p "$SBX/home" "$SBX/apps"
-ls "$SBX/clone-agent.sh" "$SBX/profiles"   # expect: only example.conf.sample
+ls "$SBX/clone-agent.sh" "$SBX/profiles"   # expect: the script, and only
+                                           # example.conf.sample under profiles/
 ```
 
 **`git archive` rather than `cp -R`, for four reasons at once.** It emits the
 tracked contents of one named revision, so: there is no `.git` in the result;
 `profiles/*.conf` are gitignored and therefore absent without a deletion step;
-`<rev>` is explicit, where `<repo>` alone silently gives you whatever branch that
-checkout happens to be on — **which is why `<rev>` must not be `HEAD`**, since
-`HEAD` *is* that branch. The maintainer's checkout is routinely on something other
-than the branch you mean to test: resolve `<rev>` to a commit, record it, and say
-in your report which commit you tested; and re-running into a fresh `mktemp -d` cannot nest
+the revision is explicit and recorded, where naming a checkout alone silently
+gives you whatever branch it happens to be on — the maintainer's is routinely not
+the branch you mean to test. Run this **from your own checkout**: that is what
+makes `HEAD` the right answer rather than a trap, and it is the only arrangement
+in which the `git status` line means anything, since status reports one working
+tree while `git archive` reads the shared object store. Point them at different
+checkouts and both checks pass while the archive misses your work. `^{commit}` so
+an annotated tag records the commit rather than the tag object; and re-running into a fresh `mktemp -d` cannot nest
 inside a previous attempt.
 
 **The cost of that, and it is a real one: `git archive` extracts *committed*
@@ -464,8 +469,8 @@ only noticed because a profile it never created turned up in its results.
 Run that `ls` and look at it: `profiles/` must contain `example.conf.sample` and
 nothing else, and `clone-agent.sh` must be there under that name — which also
 catches a `<rev>` old enough to still call the engine `clone-app.sh`. It catches a
-bad revision and a non-repo loudly. It cannot catch the two failures above, the
-wrong branch and stale code, which is what the two guard lines are for.
+bad revision and a non-repo loudly. It cannot tell you whether the commit is the
+one you meant — nothing can, which is why you record the SHA and report it.
 
 Extracting a revision also means the bundle-ID collision guard has nothing to
 scan: it reads `profiles/*.conf` (`clone-agent.sh:446`), which are gitignored and
@@ -477,7 +482,9 @@ that row forbids.
 
 `$SBX` is used by every block below, so keep the same shell — or record the path
 and re-export it. An agent harness that resets shell state between tool calls will
-otherwise expand it to nothing.
+otherwise expand it to nothing; open each later block with
+`: "${SBX:?SBX not set — re-export it}"` and the shell will stop rather than
+build paths at the filesystem root.
 
 **Take a baseline even though you are sandboxed.** The snapshot procedure below is
 written for the case where the maintainer granted permission, but the reason to
@@ -531,15 +538,15 @@ HOME="$SBX/home" "$SBX/clone-agent.sh" SbxName --dry-run \
   --source "$SBX/src-app"
 ```
 
-The copy is the first line because of what happens without it: omitting `--source`
-does **not** fail. `SRC` falls back to the adapter default and the run reads and
-preflights `/Applications/Claude.app` — the originals row of the never-touch table
-— and exits 0 with a preview that looks perfectly normal. Note where that flag
-sits: it is the **last** line of the block. The `--dry-run`-first argument below
-keeps a truncated paste from becoming a real run, but it does not keep one from
-silently reading row 1; only the flag on the last line does that. If you do hit
-`Source app not found`, the engine suggests passing `--source` with the real path;
-repair the copy instead. A `cli` target needs none of this.
+The copy is the first line because omitting `--source` does **not** fail — it
+quietly falls back to the real original (below). Note where the containment flags
+sit: `--dest-dir` and `--source` are the bottom two lines, so a truncated paste
+loses them first. The `--dry-run`-first ordering stops a truncation from becoming
+a *write*; it does not stop one from widening what gets read or targeted.
+
+Omission is never the safe default here. `--target` defaults to `all` — the
+widest target — and `--dest-dir` to `/Applications`. Every flag in that block
+narrows; leaving one out widens. A `cli` target needs none of them.
 
 `--dry-run` sits on the first line on purpose. A trailing `\` at end-of-input is
 **not** an error in zsh or bash — the command runs with the shorter argv and exits
@@ -570,8 +577,8 @@ Do not convert this block into a real run.
 **The source app is neither `$HOME`- nor `--dest-dir`-relative.** `SRC` falls back
 to the adapter's absolute `A_SOURCE_DEFAULT` (`/Applications/Claude.app`,
 `/Applications/ChatGPT.app`), so without `--source` a run reads and preflights the
-real original — read-only, so nothing is corrupted, but it is row 1 of the table
-above. Under `--dry-run` the engine never copies the source anyway
+real original — read-only, so nothing is corrupted, but it is the originals row of
+the table above. Under `--dry-run` the engine never copies the source anyway
 (`clone-agent.sh:623` is past the boundary), so `--source` buys provenance rather
 than time; it is a real run that would pay the gigabyte.
 
@@ -609,21 +616,27 @@ collateral, so:
   merged in place, so compare content rather than mtime — and Codex has no such
   write at all, its `a_post_install` is a no-op). Afterwards, say plainly that the
   first list matches. Do not say it about the second; it cannot.
-- **A Claude login is normally in the keychain, but not always — treat
-  `~/.claude-<Name>` as credential-bearing either way.** Claude Code's store is a
-  keychain backend with a plaintext fallback: the service name is suffixed with a
-  hash of the secure-storage directory (falling back to `CLAUDE_CONFIG_DIR`), and
-  when a keychain write fails non-transiently it writes
-  `<config dir>/.credentials.json` **and deletes the keychain entry**. So the
-  login can end up living only on disk, in the directory. Codex is simpler: always
-  a file, `$CODEX_HOME/auth.json`. Snapshot both — the file's existence and size,
-  and the keychain entries by service name, which
-  `security dump-keychain … | grep '"svce"'` lists without prompting (only the
-  secret values need `-d`, which does). Note the desktop and CLI use *different*
-  entries: `"<Name> Safe Storage"` is Chromium's, used by the desktop clone, while
-  the CLI's is a `Claude Code…-<hash>` name — the checklist item below greps for
-  `claude` and so catches neither Codex's three names nor, reliably, both of
-  Claude's.
+- **A Claude login may be in the keychain or on disk — treat both as
+  credential-bearing.** Claude Code's store is a keychain backend with a plaintext
+  fallback at `<config dir>/.credentials.json`, and it migrates *both ways*: a
+  non-transient keychain write failure promotes the credential to the file
+  (usually removing the keychain entry), and a later successful keychain write
+  removes the file again. So either one appearing or vanishing between your two
+  snapshots can be the store healing itself rather than damage you caused —
+  record both, and do not report a delta as breakage without checking which
+  direction it went. Codex is simpler: always a file, `$CODEX_HOME/auth.json`.
+- **There are three Claude keychain entries, and one of them is shared.** The CLI's
+  service name is `Claude Code-credentials` plus a hash of its config directory —
+  but with no `CLAUDE_CONFIG_DIR` set there is *no* hash, so the unsuffixed
+  `Claude Code-credentials` is the entry behind `~/.claude`, which the original CLI
+  and every desktop clone's bundled Claude Code share (section 12). The desktop
+  clone additionally has `"<Name> Safe Storage"`, Chromium's, which is only the
+  *key*: the encrypted blob sits under `~/Library/Application Support/<Name>`, so
+  destroying the entry logs that profile out while the blob survives, undecryptable.
+  `security dump-keychain … | grep '"svce"'` lists service names without prompting
+  **while the login keychain is unlocked** (reading the secrets needs `-d`, which
+  does prompt). The checklist item below greps `claude`, so it sees none of Codex's
+  three names.
 - Work from a copy of the profile in a **different checkout**, not the
   maintainer's. The engine always writes back to `$REPO_DIR/profiles/<Name>.conf`,
   so a subdirectory of their checkout is not far enough away.
@@ -650,10 +663,10 @@ reproduced" in it was a false negative.
 If you need a different revision, use `git worktree add`, or `git clone` the repo
 elsewhere. A plain `cp -R` of a worktree is **not** a detached copy: `.git` there
 is a one-line pointer at the original repository, so the copy shares its HEAD and
-index and a `checkout` inside it moves the real branch. Copy if you like, but
-delete the copy's `.git` — `rm -rf <copy>/.git`, and check for nested ones too,
-since this repo keeps worktrees under `.claude/worktrees/`. Section 15 sidesteps
-all of that by extracting a revision rather than copying. Read
+index and a `checkout` inside it moves the real branch — and this repo nests its
+worktrees under `.claude/worktrees/`, so a copy carries those pointers too. Do not
+`cp -R` a checkout at all: use `git worktree add`, or extract a revision the way
+section 15 does. Read
 history with `git show` and `git diff`, which need no checkout. In
 a shared or agent-driven checkout, treat `checkout`, `switch`, `restore`, `reset`,
 `stash`, `merge` and `rebase` as writes to someone else's working state — and
@@ -712,8 +725,11 @@ ls -d ~/.codex-$NAME                       # Codex only
 # 5. Bundle ID differs from the original
 defaults read "/Applications/$NAME.app/Contents/Info" CFBundleIdentifier
 
-# 6. For Claude clones, confirm keychain isolation (expect two entries)
-security dump-keychain ~/Library/Keychains/login.keychain-db 2>/dev/null | grep '"svce"' | grep -i claude
+# 6. Confirm keychain isolation. Expect one "<Name> Safe Storage" per desktop
+#    clone alongside the original's; "Claude Code-credentials" entries are one per
+#    config dir in use (the unsuffixed one is shared — section 15). Needs the login
+#    keychain unlocked; without -d this lists names only and does not prompt.
+security dump-keychain ~/Library/Keychains/login.keychain-db 2>/dev/null | grep '"svce"' | grep -iE 'claude|codex'
 
 # 7. Auto-update is actually off — check the behaviour, not the setting
 #    Claude: expect "disabled by enterprise policy", and no "Checking for updates"
