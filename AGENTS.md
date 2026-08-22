@@ -9,6 +9,12 @@ Notes for whoever maintains this repository next — human or AI.
 Every item below corresponds to a real failure. Read them before changing
 anything under `clone-agent.sh`, `adapters/`, or `tools/`.
 
+This file quotes the engine in places. Those quotes are anchors, not decoration:
+run `tools/check-doc-claims.sh` after touching either, and it will tell you which
+claim your change just invalidated. Cite the engine by **source fragment**, never
+by line number — a line number keeps matching after the code moves, silently, at
+a line that says something else.
+
 > **Read section 15 before you run anything.** The rest of this file is about
 > writing correct code; section 15 is about not destroying the maintainer's live
 > apps and logins while you test it. Its cost is unrecoverable rather than a
@@ -408,11 +414,11 @@ and the one that matters most is redirected by nothing you can pass:
 | the `.app` bundle | `--dest-dir` |
 | the CLI launcher and the agent home | a sandboxed `HOME` |
 | Claude's `<data_dir>-3p/configLibrary` directory, on app targets (Codex's `a_post_install` is a no-op) | a sandboxed `HOME`, or `--data-dir` |
-| for a `.png` icon on a real `app`/`all` run, the converted `.icns` — `${ICON:r}.icns`, i.e. beside the png, under whatever name the png has | `--icon` itself: a relative path is re-rooted to `$REPO_DIR` (`clone-agent.sh:490`) and lands in the invoked repo; an absolute one writes wherever it points |
+| for a `.png` icon on a real `app`/`all` run, the converted `.icns` — `${ICON:r}.icns`, i.e. beside the png, under whatever name the png has | `--icon` itself: a relative path is re-rooted to `$REPO_DIR` (`ICON="$REPO_DIR/$ICON"`) and lands in the invoked repo; an absolute one writes wherever it points |
 | `$REPO_DIR/profiles/<Name>.conf` | **nothing — only which repo you invoke** |
 
 The profile write is unguarded by target and unconditional: `mkdir -p "$PROFILE_DIR"`
-and `> "$PROFILE"` (`clone-agent.sh:733`, `:754`) run on every non-dry-run
+and `> "$PROFILE"` run on every non-dry-run
 invocation, `cli` included, and `>` truncates. **So working from an extracted
 copy is not a convenience — it is the only thing standing between a test run and
 the `profiles/*.conf` row of the never-touch table.** A sandboxed `HOME` alone
@@ -473,9 +479,9 @@ bad revision and a non-repo loudly. It cannot tell you whether the commit is the
 one you meant — nothing can, which is why you record the SHA and report it.
 
 Extracting a revision also means the bundle-ID collision guard has nothing to
-scan: it reads `profiles/*.conf` (`clone-agent.sh:446`), which are gitignored and
+scan: it reads `profiles/*.conf` (`for _p in "$PROFILE_DIR"/*.conf`), which are gitignored and
 so were never in the archive, and `--dest-dir` blinds the second guard, which
-scans `$DEST_DIR` (`:468`). In a sandbox nothing will catch a name collision, so
+scans `$DEST_DIR` (`for _app in "$DEST_DIR"/*.app`). In a sandbox nothing will catch a name collision, so
 use a name that exists nowhere on the machine — listing the real `profiles/`
 filenames is a read, which the `profiles/*.conf` row permits; it is writing them
 that row forbids.
@@ -522,11 +528,14 @@ launcher (`$HOME/.local/bin/<kind>-<lowercase-name>`) and its agent home
 writes the profile into whichever repo you invoked, per the table above.
 
 **Never reuse a name that exists in the real `profiles/`.** A named run rewrites
-`P_TARGET` with no warning (`clone-agent.sh:743`), so `<RealClone> --target cli`
+`P_TARGET` with no warning — the profile block prints `P_TARGET=${(qq)TARGET}`
+unconditionally and nothing above it compares the new target to the stored one — so
+`<RealClone> --target cli`
 silently converts an app profile to cli-only, and the documented post-upgrade
 `--all` then stops rebuilding that desktop clone — on a tool whose clones cannot
-auto-update. `--all` refuses `--target` for exactly this reason, and its comment
-says so (`clone-agent.sh:276-281`); a named run has no such guard.
+auto-update. `--all` refuses `--target` for exactly this reason, and says so when it refuses:
+`(( TARGET_SET )) && die "--all rebuilds each profile with its own stored
+target…"`. A named run has no such guard.
 
 **An `app` target cannot be made safe. Preview it, and leave it a preview:**
 
@@ -557,7 +566,7 @@ preview survives.
 
 That is damage control, not safety. This section opens by saying not to rely on
 `--dry-run`, and that stands here: it is one argv token, and past it the engine
-runs `lsregister -f "$APP"` and `killall Dock` (`clone-agent.sh:828-829`), which
+runs `lsregister -f "$APP"` and `killall Dock`, which
 **no flag redirects** — a `/tmp` bundle gets registered in the real Launch Services
 database and the maintainer's Dock restarts mid-session. `--dry-run`'s own summary
 of what it "would go on to" lists neither, so previewing will not warn you either.
@@ -571,15 +580,17 @@ Do not convert this block into a real run.
 - On `cli` targets, the preflight resolves the vendor command with `whence -p`
   against the ambient `PATH` and bakes that absolute path into the launcher.
 - `TMPDIR`: Codex's `a_cli_preflight` (`adapters/codex.sh`) creates a temp dir and
-  executes the real vendor `codex` binary — and it runs at `clone-agent.sh:578`,
-  *above* the dry-run boundary, so `--dry-run` does not suppress it.
+  executes the real vendor `codex` binary — and it runs *above* the dry-run
+  boundary, so `--dry-run` does not suppress it. Check rather than trust that:
+  `grep -n 'a_cli_preflight\|dry-run: stopping here' clone-agent.sh` must print
+  the preflight line first.
 
 **The source app is neither `$HOME`- nor `--dest-dir`-relative.** `SRC` falls back
 to the adapter's absolute `A_SOURCE_DEFAULT` (`/Applications/Claude.app`,
 `/Applications/ChatGPT.app`), so without `--source` a run reads and preflights the
 real original — read-only, so nothing is corrupted, but it is the originals row of
 the table above. Under `--dry-run` the engine never copies the source anyway
-(`clone-agent.sh:623` is past the boundary), so `--source` buys provenance rather
+(`cp -R "$SRC" "$APP"` is past that same boundary), so `--source` buys provenance rather
 than time; it is a real run that would pay the gigabyte.
 
 **`--all` cannot be sandboxed by flags at all.** It accepts `--dest-dir` and
@@ -616,27 +627,28 @@ collateral, so:
   merged in place, so compare content rather than mtime — and Codex has no such
   write at all, its `a_post_install` is a no-op). Afterwards, say plainly that the
   first list matches. Do not say it about the second; it cannot.
-- **A Claude login may be in the keychain or on disk — treat both as
-  credential-bearing.** Claude Code's store is a keychain backend with a plaintext
-  fallback at `<config dir>/.credentials.json`, and it migrates *both ways*: a
-  non-transient keychain write failure promotes the credential to the file
-  (usually removing the keychain entry), and a later successful keychain write
-  removes the file again. So either one appearing or vanishing between your two
-  snapshots can be the store healing itself rather than damage you caused —
-  record both, and do not report a delta as breakage without checking which
-  direction it went. Codex is simpler: always a file, `$CODEX_HOME/auth.json`.
+- **A Claude login may live in the keychain or on disk — snapshot both.** Claude
+  Code keeps the credential in one of two places: the keychain, or
+  `<config dir>/.credentials.json`. It moves the credential between them on its
+  own, in both directions, with no action from the maintainer or this tool. So a
+  `.credentials.json` that appears, or a keychain entry that vanishes, is not by
+  itself evidence of damage. Record both before and after; if either moved,
+  confirm the profile is still signed in rather than reporting breakage — that is
+  the check, not which of the two holds it. (Observed as of 2026-08; a vendor
+  implementation detail, not a contract. If the two-place behaviour stops being
+  true, the snapshot advice still is. Codex is simpler: always a file,
+  `$CODEX_HOME/auth.json`.)
 - **There are three Claude keychain entries, and one of them is shared.** The CLI's
   service name is `Claude Code-credentials` plus a hash of its config directory —
   but with no `CLAUDE_CONFIG_DIR` set there is *no* hash, so the unsuffixed
   `Claude Code-credentials` is the entry behind `~/.claude`, which the original CLI
   and every desktop clone's bundled Claude Code share (section 12). The desktop
-  clone additionally has `"<Name> Safe Storage"`, Chromium's, which is only the
+  clone additionally has `"<Name> Safe Storage"` (section 6), which is only the
   *key*: the encrypted blob sits under `~/Library/Application Support/<Name>`, so
   destroying the entry logs that profile out while the blob survives, undecryptable.
   `security dump-keychain … | grep '"svce"'` lists service names without prompting
   **while the login keychain is unlocked** (reading the secrets needs `-d`, which
-  does prompt). The checklist item below greps `claude`, so it sees none of Codex's
-  three names.
+  does prompt).
 - Work from a copy of the profile in a **different checkout**, not the
   maintainer's. The engine always writes back to `$REPO_DIR/profiles/<Name>.conf`,
   so a subdirectory of their checkout is not far enough away.
