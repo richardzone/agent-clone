@@ -55,7 +55,9 @@ further input. The order matters: `--all` re-copies from the *original* app, so
 rebuilding before the original has updated just reproduces the old version.
 
 Add `--dry-run` to any of the above to see exactly what would happen without
-touching a single file.
+installing or modifying an app, launcher or profile. (One exception: Codex's CLI
+preflight runs before the dry-run boundary, so it still creates a temp directory
+and asks the real `codex` binary a question. It changes nothing you own.)
 
 Icons given as `.png` are converted to `.icns` automatically (background cropped,
 centered, macOS corner radius applied); `.icns` is accepted directly. The two
@@ -109,7 +111,10 @@ Outside the app bundle — which is why rebuilding never loses logins or history
   keychain entry. So an MCP server authorized from the desktop is not visible to
   the launcher, and vice versa
 - `~/.claude-<Name>` — Claude **CLI launcher** only: the `CLAUDE_CONFIG_DIR` this
-  tool generates, holding that profile's login, `settings.json` and MCP config
+  tool generates, holding that profile's sessions, `settings.json` and MCP config.
+  The login may be here as `.credentials.json` or in the keychain — Claude Code
+  moves it between the two on its own — so treat this directory as
+  credential-bearing. (Codex is simpler: `auth.json` is always a real file.)
 
 The **desktop** clone's `~/.claude` is deliberately *not* isolated. Claude Desktop
 runs its own bundled Claude Code, and that reads `~/.claude` — the same directory
