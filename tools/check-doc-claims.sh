@@ -49,6 +49,58 @@ for a in $anchors; do
   fi
 done
 
+# The anchors above only prove the fragment is still in the engine. That is half
+# the job: the doc's copy of it can drift independently, and a check that lets
+# section 15 be gutted while reporting success is worse than none. So assert the
+# doc still says the things those anchors back.
+print "\ndoc still makes the claims the anchors back"
+doc_must=(
+  'for _p in "$PROFILE_DIR"/*.conf§the bundle-ID guard citation'
+  'for _app in "$DEST_DIR"/*.app§the dest-dir guard citation'
+  'mkdir -p "$PROFILE_DIR"§the profile-write quote'
+  '> "$PROFILE"§the truncation quote'
+  'ICON="$REPO_DIR/$ICON"§the icon re-rooting citation'
+  'P_TARGET=${(qq)TARGET}§the silent target-rewrite quote'
+  '(( TARGET_SET )) &&§the --all guard quote'
+  'cp -R "$SRC" "$APP"§the source-copy boundary claim'
+)
+# These two the doc states in prose rather than quoting, so assert the prose.
+# The engine side is covered by the anchors above.
+doc_must+=(
+  '`--target` defaults to `all`§the widest-default claim'
+  '`--dest-dir` to `/Applications`§the dest-dir default claim'
+)
+for d in $doc_must; do
+  frag="${d%%§*}"; what="${d#*§}"
+  grep -qF -- "$frag" "$DOC" && ok "$what" \
+    || note "$what is gone from $DOC — the anchor now guards nothing"
+done
+
+# Load-bearing structure. Each of these has been deleted or inverted by a real
+# edit at some point in this file's history.
+print "\nsection 15 still contains its load-bearing parts"
+struct=(
+  '| Never touch | Why |§the never-touch table'
+  'Every non-dry-run§the unconditional-write framing'
+  'The list is open; these are the ones that bite§the un-redirectable list'
+  'cannot be sandboxed by flags at all§the --all warning'
+  'cannot be sandboxed either§the --init warning'
+  'SbxName --dry-run§--dry-run first in the app block'
+  'is the only fully contained§§ABSENT§the retracted "fully contained" claim'
+)
+for s in $struct; do
+  if [[ "$s" == *'§§ABSENT§'* ]]; then
+    frag="${s%%§§ABSENT§*}"; what="${s##*§}"
+    grep -qF -- "$frag" "$DOC" && note "$what came back" || ok "$what stays retracted"
+  else
+    frag="${s%%§*}"; what="${s#*§}"
+    grep -qF -- "$frag" "$DOC" && ok "$what" || note "$what is missing from $DOC"
+  fi
+done
+n15=$(awk '/^## 15\./{f=1} /^## 16\./{f=0} f' "$DOC" | wc -l | tr -d ' ')
+(( n15 > 150 )) && ok "section 15 is still substantive ($n15 lines)" \
+                || note "section 15 shrank to $n15 lines — was it gutted?"
+
 print "\nordering (which side of the dry-run boundary things sit on)"
 pre=$(grep -n 'a_cli_preflight .. die' "$ENGINE" | cut -d: -f1)
 bnd=$(grep -nF 'dry-run: stopping here' "$ENGINE" | cut -d: -f1)

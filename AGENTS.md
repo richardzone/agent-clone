@@ -10,8 +10,9 @@ Every item below corresponds to a real failure. Read them before changing
 anything under `clone-agent.sh`, `adapters/`, or `tools/`.
 
 This file quotes the engine in places. Those quotes are anchors, not decoration:
-run `tools/check-doc-claims.sh` after touching either, and it will tell you which
-claim your change just invalidated. Cite the engine by **source fragment**, never
+run `tools/check-doc-claims.sh` after touching either. It asserts that each
+fragment still exists in the engine *and* is still quoted here, so a change to
+one side without the other fails and names the claim. Cite the engine by **source fragment**, never
 by line number — a line number keeps matching after the code moves, silently, at
 a line that says something else.
 
@@ -425,7 +426,8 @@ the `profiles/*.conf` row of the never-touch table.** A sandboxed `HOME` alone
 never contains a run.
 
 ```zsh
-cd <your own checkout>                   # the one holding the edits you want to test
+: "${REPO:?set REPO to your own checkout — the one holding your edits}"
+cd "$REPO"
 git status --porcelain                   # must print nothing — see below
 SHA="$(git rev-parse --verify HEAD^{commit})"   # record it; report what you tested
 SBX="$(mktemp -d)"                       # not a fixed /tmp name — see below
@@ -566,7 +568,7 @@ preview survives.
 
 That is damage control, not safety. This section opens by saying not to rely on
 `--dry-run`, and that stands here: it is one argv token, and past it the engine
-runs `lsregister -f "$APP"` and `killall Dock`, which
+runs Launch Services' `lsregister -f` against the clone, and `killall Dock`, which
 **no flag redirects** — a `/tmp` bundle gets registered in the real Launch Services
 database and the maintainer's Dock restarts mid-session. `--dry-run`'s own summary
 of what it "would go on to" lists neither, so previewing will not warn you either.
