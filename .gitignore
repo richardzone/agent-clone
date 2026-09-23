@@ -9,3 +9,6 @@ profiles/*.conf
 
 # Note: icons/ IS tracked — new users rely on it to try the flow, and the README
 # presents it that way.
+
+# Agent worktrees and session state live here; never version-controlled.
+.claude/

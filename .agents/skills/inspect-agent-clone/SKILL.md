@@ -5,7 +5,7 @@ description: Inspect a specific installed agent-clone app or generated CLI launc
 
 # Inspect an installed clone
 
-Read `AGENTS.md` and `adapters/README.md`. Resolve the user's intended profile
+Read `AGENTS.md` (especially sections 15–16) and `adapters/README.md`. Resolve the user's intended profile
 name, kind (Claude/Codex), target (app/cli/all), source bundle, clone bundle,
 launcher and data directories. Read the profile as text before any engine
 invocation; `.conf` files are executable shell, not inert data. Do not print

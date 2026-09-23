@@ -28,8 +28,15 @@ installed clone or launcher. Developer skills live in `.agents/skills/`, with
 `.claude/skills` pointing to the same files. They do not belong inside generated
 apps, profiles or launchers.
 
-Before committing, run the syntax checks below and `git diff --check`, plus
-behavioral checks selected by the validation skill. Run each command separately
+Before making a scratch commit, run the static checks below and `git diff --check`.
+A scratch commit is allowed before behavioral validation: AGENTS.md section 15
+requires committed content to create the revision-bound test archive. Record that
+commit's SHA and validate its archive, not an older revision or uncommitted tree.
+Complete the affected behavioral checks before reporting delivery as validated
+or merging; a scratch commit or draft PR does not claim validation is complete.
+If a fix changes the tested content, commit it and validate the new revision.
+For documentation-only changes, static, link and scenario checks suffice; no
+engine invocation or installed-app test is required. Run each command separately
 and stop on a nonzero exit; a later success must not hide an earlier failure.
 
 ```bash
@@ -38,15 +45,20 @@ zsh -f -n adapters/claude.sh
 zsh -f -n adapters/codex.sh
 zsh -f -n tools/make-icon.sh
 zsh -f -n tools/codex-cli-launcher
+zsh -f -n tools/check-doc-claims.sh
+zsh -f tools/check-doc-claims.sh
 node --check tools/patch-asar-productname.js
 node --check tools/write-config-library.js
 node --check tools/codex-cli-launcher.cjs
 ```
 
-This repository has no checked-in test runner or coverage threshold. Syntax and
+This repository has a documentation-claim checker, but no general behavioral
+test runner or coverage threshold. Syntax and
 `--dry-run` prove neither successful app launch nor account isolation. For runtime
 changes, exercise the affected behavior in a task-scoped fixture or authorized
-throwaway clone. Record blocked live checks honestly. Documentation-only changes
+throwaway clone, following AGENTS.md sections 15–16. An app preview must not
+be converted to a real build without the explicit permission described there.
+Record blocked live checks honestly. Documentation-only changes
 need links, command-contract and scenario review, not installation or login.
 Add focused behavioral regression checks when code changes; do not test prose
 wording. Attribute failures before changing assertions or claiming environment
