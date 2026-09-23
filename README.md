@@ -136,6 +136,36 @@ Note that each clone gets its own bundle ID, and macOS grants permissions
 (notifications, microphone, screen recording, …) per bundle ID — so a clone asks for
 them again on first use, independently of the original.
 
+### Share Codex skills and plugins across profiles (optional)
+
+Codex profiles have separate `CODEX_HOME` directories. To give two or more
+profiles the same **personal skills** and **enabled plugins**, use the standalone
+tool below. It accepts arbitrary Codex homes; no clone name or maintainer path is
+built into it. The first command only prints a plan:
+
+```bash
+python3 tools/share-codex-extensions.py \
+  --home "$HOME/.codex" --home "$HOME/.codex-MyCodex"
+python3 tools/share-codex-extensions.py \
+  --home "$HOME/.codex" --home "$HOME/.codex-MyCodex" --apply
+```
+
+The tool requires Python 3.11+ and a Codex CLI with `codex plugin add`. It links
+top-level user skills with a `SKILL.md` from each home into
+`~/.agents/skills`, so edits to the original skill are visible to both profiles.
+It leaves system and plugin-bundled skills alone. An existing shared skill with
+different contents is a conflict and stops the run before any changes.
+
+For plugins, it takes the union of entries explicitly set to `enabled = true`
+in each home's `config.toml`, then calls `codex plugin add` with that home's
+`CODEX_HOME` for missing entries. It does not copy plugin caches or edit TOML
+directly. Installation may require network access; a successful install does not
+authenticate a connected service. Open a new task in each running Codex instance
+to check the result. Re-run the command to pick up newly enabled plugins.
+
+This is extension sharing only. Account logins, sessions, MCP server definitions,
+and MCP OAuth credentials remain in their respective profile stores.
+
 ---
 
 ## Notes
