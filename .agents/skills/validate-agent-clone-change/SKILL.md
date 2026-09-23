@@ -35,7 +35,11 @@ not an assertion. Cover distinct allowed and refused paths affected by a change.
 | Icons | Generate into a temporary directory from a test image; visually inspect padding and confirm the affected icon fields. |
 | Docs/developer skills | Check links, frontmatter and command contracts; walk a realistic scenario through the instructions. No app launch, account login or rebuild required. |
 
-Run CONTRIBUTING's syntax checks and `git diff --check`. Run commands separately
+Run CONTRIBUTING's static checks. Check unstaged changes with `git diff --check`,
+staged changes with `git diff --cached --check`, and the committed patch with
+`git diff --check "$BASE_SHA" HEAD` using the recorded review-base SHA.
+An empty worktree diff does not validate staged or committed content.
+Run commands separately
 and retain each exit code. There is no `make test`, coverage floor or npm test
 suite in this repository; do not invent one. For new/changed executable helpers,
 exercise meaningful behavior as well as parsing. After fixes, rerun affected

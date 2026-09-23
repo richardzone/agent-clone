@@ -28,7 +28,12 @@ installed clone or launcher. Developer skills live in `.agents/skills/`, with
 `.claude/skills` pointing to the same files. They do not belong inside generated
 apps, profiles or launchers.
 
-Before making a scratch commit, run the static checks below and `git diff --check`.
+Before making a scratch commit, run the static checks below, `git diff --check`
+for unstaged changes and `git diff --cached --check` for staged changes.
+Before delivery or merge, also run `git diff --check "$BASE_SHA" HEAD`, with
+`BASE_SHA` set to the recorded review base commit, to inspect the committed patch.
+All applicable checks must pass; an empty worktree diff proves nothing about
+staged or committed changes.
 A scratch commit is allowed before behavioral validation: AGENTS.md section 15
 requires committed content to create the revision-bound test archive. Record that
 commit's SHA and validate its archive, not an older revision or uncommitted tree.
