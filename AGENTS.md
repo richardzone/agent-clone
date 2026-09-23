@@ -11,6 +11,24 @@ anything under `clone-agent.sh`, `adapters/`, or `tools/`.
 
 ---
 
+## Development workflow
+
+Follow [CONTRIBUTING.md](CONTRIBUTING.md) for acceptance criteria, validation,
+independent adversarial review and the automatic two-round review/fix loop.
+Round-1 fixes trigger round 2; only round-2 fixes trigger one final confirmation.
+A reported P0 in round 2 stops further fixes pending the user's decision.
+Record rounds and evidence in the PR or task; splitting work does not reset them.
+
+- [validate-agent-clone-change](.agents/skills/validate-agent-clone-change/SKILL.md):
+  choose evidence and checks for an engine, adapter, tool or documentation change.
+- [inspect-agent-clone](.agents/skills/inspect-agent-clone/SKILL.md): inspect a
+  specific installed app or CLI profile without rebuilding or changing accounts.
+
+The numbered engineering constraints below remain in force. Dated upstream
+observations need current verification before claiming a new version behaves
+identically. A workflow/docs task does not authorize rebuilding clones, stopping
+sessions, editing shell dotfiles, modifying Keychain or changing profile isolation.
+
 ## 1. Never unpack and repack the asar
 
 **This is the single most important design decision in this repo.**
@@ -376,14 +394,20 @@ them and it will almost certainly be the wrong one.
 
 ## Verification checklist
 
-Run these after changing the script. **A clean run is not evidence; you have to
-actually launch the app.**
+Select affected checks after changing runtime code; use the validation skill to
+separate read-only inspection from actions requiring a scoped runtime test.
+**A clean build is not launch evidence.** When the changed behavior requires
+launch, validate an authorized throwaway clone or report that proof as blocked.
+The examples below require explicit profile/source paths; never copy placeholder
+names into a command against an unrelated live instance.
 
 ```bash
 NAME=MyCodex
+# Set SOURCE_APP to the actual source bundle selected by this profile/adapter.
+SOURCE_APP=/Applications/Codex.app
 
 # 1. Version matches the original
-/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' /Applications/ChatGPT.app/Contents/Info.plist
+/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$SOURCE_APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "/Applications/$NAME.app/Contents/Info.plist"
 
 # 2. Signature is valid
@@ -405,7 +429,8 @@ ls -d ~/.codex-$NAME                       # Codex only
 defaults read "/Applications/$NAME.app/Contents/Info" CFBundleIdentifier
 
 # 6. For Claude clones, confirm keychain isolation (expect two entries)
-security dump-keychain ~/Library/Keychains/login.keychain-db 2>/dev/null | grep '"svce"' | grep -i claude
+# Inspect only the named original/clone Safe Storage item metadata in Keychain
+# Access when needed; never dump the whole Keychain or reveal item secrets.
 
 # 7. Auto-update is actually off — check the behaviour, not the setting
 #    Claude: expect "disabled by enterprise policy", and no "Checking for updates"
@@ -457,8 +482,11 @@ env ANTHROPIC_PROFILE=x ANTHROPIC_BASE_URL=http://evil OPENAI_API_KEY=sk-x \
 # account — the launcher cannot prove that for you.
 
 # 4. A dotfile cannot break it
-printf 'echo BANNER\n' >> ~/.zshenv && $CMD --version | head -1 && \
-  sed -i '' '$d' ~/.zshenv           # Expect: no BANNER in the output
+clone_test_zdotdir=$(mktemp -d)
+printf 'echo BANNER\n' > "$clone_test_zdotdir/.zshenv"
+ZDOTDIR="$clone_test_zdotdir" "$(whence -p $CMD)" --version
+# Expect: no BANNER. Remove only this temporary directory after inspection.
+rm -r -- "$clone_test_zdotdir"
 ```
 
 ⚠️ **`open` will not restart a clone that is still running** — it just activates
