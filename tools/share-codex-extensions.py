@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Share user skills and enabled plugins across explicit Codex homes.
 
-No profile is inferred from this repository. The default mode only prints a plan.
+No profile is inferred from this repository. The default mode does not apply changes.
 """
 
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -24,7 +25,11 @@ def skill_digest(directory: Path) -> str:
     digest = hashlib.sha256()
     skill_root = directory.resolve(strict=True)
     digest.update(str(skill_root.stat().st_mode & 0o777).encode() + b"\0")
-    for root, dirs, files in os.walk(directory, followlinks=False):
+
+    def walk_error(error: OSError) -> None:
+        die(f"cannot read skill directory {error.filename}: {error.strerror}")
+
+    for root, dirs, files in os.walk(directory, followlinks=False, onerror=walk_error):
         dirs.sort()
         for name in sorted(dirs + files):
             path = Path(root) / name
@@ -85,6 +90,47 @@ def marketplaces(home: Path) -> dict:
     if not isinstance(entries, dict):
         die(f"[marketplaces] is not a table in {home / 'config.toml'}")
     return entries
+
+
+def cli_json(codex: str, home: Path, command: list[str]) -> dict:
+    env = os.environ.copy()
+    env["CODEX_HOME"] = str(home)
+    try:
+        result = subprocess.run([codex, "plugin", *command, "--json"], env=env,
+                                stdin=subprocess.DEVNULL, capture_output=True,
+                                text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        die(f"cannot query Codex plugins in {home}: {error}")
+    if result.returncode:
+        die(f"Codex plugin query failed in {home}: plugin {' '.join(command)}")
+    try:
+        data = json.loads(result.stdout)
+    except ValueError as error:
+        die(f"invalid Codex plugin JSON in {home}: {error}")
+    if not isinstance(data, dict):
+        die(f"invalid Codex plugin response in {home}: expected an object")
+    return data
+
+
+def active_plugins(codex: str, home: Path) -> set[str]:
+    installed = cli_json(codex, home, ["list"]).get("installed")
+    if not isinstance(installed, list):
+        die(f"invalid Codex plugin list in {home}: missing installed array")
+    if any(not isinstance(item, dict) or not isinstance(item.get("pluginId"), str)
+           for item in installed):
+        die(f"invalid installed plugin entry in {home}")
+    return {item["pluginId"] for item in installed
+            if item.get("installed") is True and item.get("enabled") is True}
+
+
+def listed_marketplaces(codex: str, home: Path) -> set[str]:
+    entries = cli_json(codex, home, ["marketplace", "list"]).get("marketplaces")
+    if not isinstance(entries, list):
+        die(f"invalid Codex marketplace list in {home}: missing marketplaces array")
+    if any(not isinstance(item, dict) or not isinstance(item.get("name"), str)
+           for item in entries):
+        die(f"invalid marketplace entry in {home}")
+    return {item["name"] for item in entries}
 
 
 def marketplace_add_args(name: str, spec: dict) -> list[str]:
@@ -163,12 +209,23 @@ def main() -> None:
         redundant += [(name, copy) for copy in copies
                       if copy.resolve() != canonical.resolve()]
 
-    current = {home: enabled_plugins(home) for home in homes}
+    codex = shutil.which(args.codex_bin)
+    if codex is None:
+        die(f"Codex CLI not found: {args.codex_bin}")
+    installed = {home: active_plugins(codex, home) for home in homes}
+    current = {home: enabled_plugins(home) | installed[home] for home in homes}
     desired = set().union(*current.values())
-    installs = [(home, plugin) for home in homes for plugin in sorted(desired - current[home])]
+    installs = [(home, plugin) for home in homes for plugin in sorted(desired - installed[home])]
     configured_markets = {home: marketplaces(home) for home in homes}
     market_additions: dict[tuple[Path, str], dict] = {}
     builtin_markets = {"openai-bundled", "openai-primary-runtime"}
+    if any(plugin.rsplit("@", 1)[-1] in builtin_markets for plugin in desired):
+        builtin_available = {home: listed_marketplaces(codex, home) for home in homes}
+        for home, plugin in installs:
+            market = plugin.rsplit("@", 1)[-1]
+            if market in builtin_markets and market not in builtin_available[home]:
+                die(f"built-in marketplace {market!r} is unavailable in {home}; "
+                    "initialize that Codex home and retry before applying changes")
     market_specs: dict[str, dict] = {}
     for plugin in sorted(desired):
         if "@" not in plugin:
@@ -222,9 +279,6 @@ def main() -> None:
         print("Plan only; pass --apply to make these changes.")
         return
 
-    codex = shutil.which(args.codex_bin)
-    if (installs or market_additions) and codex is None:
-        die(f"Codex CLI not found: {args.codex_bin}")
     if links:
         shared.mkdir(parents=True, exist_ok=True)
     for name, source in links:
@@ -263,13 +317,18 @@ def main() -> None:
         env["CODEX_HOME"] = str(home)
         result = subprocess.run([codex, "plugin", "add", plugin], env=env,
                                 stdin=subprocess.DEVNULL, capture_output=True, text=True)
-        if result.returncode or plugin not in enabled_plugins(home):
+        if result.returncode or plugin not in active_plugins(codex, home):
             failed.append((home, plugin))
             print(f"FAILED plugin install: {plugin} in {home}", file=sys.stderr)
         else:
             print(f"Installed plugin: {plugin} in {home}")
     if failed:
         die(f"{len(failed)} plugin installation(s) failed; successful changes remain in place")
+    for home in homes:
+        missing = desired - active_plugins(codex, home)
+        if missing:
+            die(f"{len(missing)} desired plugin(s) are not active in {home}; "
+                "successful changes remain in place")
     print("Done. Open a new task in each Codex instance to verify the skills and plugins.")
 
 

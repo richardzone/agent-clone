@@ -1,5 +1,6 @@
 """Containment tests for the optional Codex extension sharing tool."""
 
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -21,33 +22,53 @@ class ShareExtensionsTest(unittest.TestCase):
         self.shared = self.root / "shared-skills"
         self.cli = self.root / "codex"
         self.cli.write_text(
-            "#!/usr/bin/env python3\n"
-            "import os, pathlib, sys\n"
-            "home = pathlib.Path(os.environ['CODEX_HOME'])\n"
-            "assert sys.argv[1] == 'plugin'\n"
-            "with (home / 'config.toml').open('a') as file:\n"
-            "    if sys.argv[2:4] == ['marketplace', 'add']:\n"
-            "        source = sys.argv[4]\n"
-            "        name = pathlib.Path(source).name\n"
-            "        file.write('\\n[marketplaces.' + name + ']\\nsource_type = \\\"local\\\"\\nsource = \\\"' + source + '\\\"\\n')\n"
-            "    else:\n"
-            "        assert sys.argv[2] == 'add'\n"
-            "        name = sys.argv[3]\n"
-            "        if name.endswith('@team'):\n"
-            "            assert '[marketplaces.team]' in (home / 'config.toml').read_text()\n"
-            "        file.write('\\n[plugins.\"' + name + '\"]\\nenabled = true\\n')\n"
+            r'''#!/usr/bin/env python3
+import json, os, pathlib, sys, tomllib
+home = pathlib.Path(os.environ['CODEX_HOME'])
+config = home / 'config.toml'
+data = tomllib.loads(config.read_text()) if config.exists() else {}
+marker = home / '.installed-plugins'
+installed = set(marker.read_text().splitlines()) if marker.exists() else set()
+args = sys.argv[1:]
+if args == ['plugin', 'list', '--json']:
+    print(json.dumps({'installed': [
+        {'pluginId': name, 'installed': True,
+         'enabled': data.get('plugins', {}).get(name, {}).get('enabled') is True}
+        for name in sorted(installed)], 'available': []}))
+elif args == ['plugin', 'marketplace', 'list', '--json']:
+    print(json.dumps({'marketplaces': [
+        {'name': name} for name in sorted(data.get('marketplaces', {}))]}))
+elif args[:3] == ['plugin', 'marketplace', 'add']:
+    source = args[3]
+    name = pathlib.Path(source).name
+    with config.open('a') as file:
+        file.write(f'\n[marketplaces.{name}]\nsource_type = "local"\nsource = "{source}"\n')
+elif args[:2] == ['plugin', 'add']:
+    name = args[2]
+    market = name.rsplit('@', 1)[-1]
+    if market in ('team', 'openai-bundled', 'openai-primary-runtime'):
+        assert market in data.get('marketplaces', {}), 'marketplace unavailable'
+    if name not in data.get('plugins', {}):
+        with config.open('a') as file:
+            file.write(f'\n[plugins."{name}"]\nenabled = true\n')
+    if os.environ.get('FAKE_CODEX_ADD_NO_INSTALL') != '1':
+        installed.add(name)
+        marker.write_text('\n'.join(sorted(installed)) + '\n')
+else:
+    raise SystemExit(f'unexpected command: {args}')
+'''
         )
         self.cli.chmod(0o755)
 
-    def run_tool(self, *extra):
+    def run_tool(self, *extra, env=None):
         return subprocess.run(
             [sys.executable, str(SCRIPT),
              "--home", str(self.homes[0]), "--home", str(self.homes[1]),
              "--shared-skills", str(self.shared), "--codex-bin", str(self.cli),
-             *extra], capture_output=True, text=True,
+             *extra], capture_output=True, text=True, env=env,
         )
 
-    def test_plan_is_read_only_and_apply_reconciles_both_homes(self):
+    def test_plan_does_not_change_extensions_and_apply_reconciles_both_homes(self):
         (self.homes[0] / "skills" / "first-skill").mkdir()
         (self.homes[0] / "skills" / "first-skill" / "SKILL.md").write_text("first")
         (self.homes[1] / "skills" / "second-skill").mkdir()
@@ -71,6 +92,47 @@ class ShareExtensionsTest(unittest.TestCase):
         self.assertEqual((self.homes[0] / "auth.json").read_text(), "account-a")
         self.assertEqual((self.homes[1] / "auth.json").read_text(), "account-b")
         self.assertIn("Plugin installations: 0", self.run_tool().stdout)
+
+    def test_enabled_without_installation_is_repaired(self):
+        plugin = "sample@market"
+        (self.homes[0] / "config.toml").write_text(
+            f'[plugins."{plugin}"]\nenabled = true\n'
+        )
+        plan = self.run_tool()
+        self.assertEqual(plan.returncode, 0, plan.stderr)
+        self.assertIn("Plugin installations: 2", plan.stdout)
+        self.assertFalse((self.homes[0] / ".installed-plugins").exists())
+
+        applied = self.run_tool("--apply")
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        for home in self.homes:
+            self.assertIn(plugin, (home / ".installed-plugins").read_text())
+        self.assertIn("Plugin installations: 0", self.run_tool().stdout)
+
+    def test_cli_success_without_installed_postcondition_fails(self):
+        (self.homes[0] / "config.toml").write_text(
+            '[plugins."sample@market"]\nenabled = true\n'
+        )
+        result = self.run_tool("--apply", env={**os.environ, "FAKE_CODEX_ADD_NO_INSTALL": "1"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("FAILED plugin install", result.stderr)
+        self.assertIn("Plugin installations: 2", self.run_tool().stdout)
+
+    def test_missing_builtin_marketplace_refuses_before_skill_links(self):
+        skill = self.homes[0] / "skills" / "source-skill"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text("safe")
+        (self.homes[0] / "config.toml").write_text(
+            f'[marketplaces.openai-bundled]\nsource_type = "local"\n'
+            f'source = "{self.root / "bundled"}"\n'
+            '[plugins."browser@openai-bundled"]\nenabled = true\n'
+        )
+        (self.homes[0] / ".installed-plugins").write_text("browser@openai-bundled\n")
+        result = self.run_tool("--apply")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("built-in marketplace", result.stderr)
+        self.assertFalse(self.shared.exists())
+        self.assertFalse((self.homes[1] / "config.toml").exists())
 
     def test_conflicting_skill_aborts_before_changes(self):
         for home, text in zip(self.homes, ("different-a", "different-b")):
@@ -183,6 +245,27 @@ class ShareExtensionsTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("differs", result.stderr)
         self.assertFalse(self.shared.exists())
+
+    @unittest.skipIf(os.geteuid() == 0, "root can traverse mode 000 directories")
+    def test_unreadable_skill_directory_refuses_before_unifying(self):
+        locked = []
+        try:
+            for home, value in zip(self.homes, ("A", "B")):
+                skill = home / "skills" / "same-name"
+                hidden = skill / "locked"
+                hidden.mkdir(parents=True)
+                (skill / "SKILL.md").write_text("same")
+                (hidden / "data.txt").write_text(value)
+                hidden.chmod(0)
+                locked.append(hidden)
+            result = self.run_tool("--apply")
+        finally:
+            for hidden in locked:
+                hidden.chmod(0o700)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot read skill directory", result.stderr)
+        self.assertFalse(self.shared.exists())
+        self.assertEqual((locked[1] / "data.txt").read_text(), "B")
 
     def test_same_shared_skill_with_external_link_needs_no_unification(self):
         skill = self.shared / "existing"
