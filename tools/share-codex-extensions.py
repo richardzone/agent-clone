@@ -64,6 +64,9 @@ def user_skills(home: Path) -> dict[str, Path]:
     directory = home / "skills"
     if not directory.is_dir():
         return {}
+    for path in directory.iterdir():
+        if path.is_symlink() and not path.exists():
+            die(f"broken skill link in {home}: {path}")
     return {
         path.name: path
         for path in sorted(directory.iterdir())
@@ -168,6 +171,14 @@ def marketplace_add_args(name: str, spec: dict) -> list[str]:
     return args
 
 
+def marketplace_identity(name: str, spec: dict) -> tuple:
+    marketplace_add_args(name, spec)
+    source = spec["source"]
+    if spec["source_type"] == "local":
+        return ("local", str(Path(source).expanduser().resolve()))
+    return ("git", source, spec.get("ref"), tuple(sorted(spec.get("sparse_paths", []))))
+
+
 def validate_local_marketplace(name: str, spec: dict, plugin: str) -> None:
     if spec.get("source_type") != "local":
         return
@@ -239,6 +250,8 @@ def main() -> None:
         folded_names[folded] = name
     if shared.is_dir():
         for entry in shared.iterdir():
+            if entry.is_symlink() and not entry.exists():
+                die(f"broken shared skill link: {entry}")
             folded = unicodedata.normalize("NFD", entry.name).casefold()
             if folded in folded_names and folded_names[folded] != entry.name:
                 die(f"shared skill name {entry.name!r} collides with "
@@ -302,7 +315,7 @@ def main() -> None:
         for source_home, other in definitions:
             if not isinstance(other, dict):
                 die(f"invalid marketplace {market!r} in {source_home / 'config.toml'}")
-            if other != spec:
+            if marketplace_identity(market, other) != marketplace_identity(market, spec):
                 die(f"marketplace {market!r} has conflicting sources in {definitions[0][0]} and {source_home}")
         if any(plugin in current[source] and market not in configured_markets[source]
                for source in homes):
@@ -361,8 +374,12 @@ def main() -> None:
     for name, digest in target_digests.items():
         if skill_digest(shared / name) != digest:
             die(f"shared skill changed during plugin preflight: {shared / name}")
+    for _, copy in redundant:
+        if not os.access(copy.parent, os.W_OK | os.X_OK):
+            die(f"cannot replace skill in unwritable directory: {copy.parent}")
 
     created_links: list[tuple[Path, Path]] = []
+    converted: list[tuple[str, Path, Path, Path]] = []
     created_shared = bool(links) and not shared.exists()
     try:
         if links:
@@ -378,29 +395,43 @@ def main() -> None:
         for (name, copy), digest in redundant_digests.items():
             if skill_digest(copy) != digest or skill_digest(shared / name) != digest:
                 die(f"skill changed during apply: {copy}")
-    except BaseException:
-        for target, source in reversed(created_links):
-            if target.is_symlink() and target.readlink() == source:
-                target.unlink()
-        if created_shared:
+        for name, copy in redundant:
+            target = shared / name
+            backup = copy.with_name(f".{name}.before-sharing-{uuid.uuid4().hex[:12]}")
+            copy.rename(backup)
             try:
-                shared.rmdir()
-            except OSError:
-                pass
+                copy.symlink_to(target, target_is_directory=True)
+            except BaseException:
+                backup.rename(copy)
+                raise
+            converted.append((name, copy, backup, target))
+    except BaseException:
+        rollback_complete = True
+        for _, copy, backup, target in reversed(converted):
+            try:
+                if copy.is_symlink() and copy.readlink() == target:
+                    copy.unlink()
+                    backup.rename(copy)
+            except OSError as error:
+                rollback_complete = False
+                print(f"ROLLBACK FAILED for {copy}: {error}", file=sys.stderr)
+        if rollback_complete:
+            for target, source in reversed(created_links):
+                try:
+                    if target.is_symlink() and target.readlink() == source:
+                        target.unlink()
+                except OSError as error:
+                    print(f"ROLLBACK FAILED for {target}: {error}", file=sys.stderr)
+            if created_shared:
+                try:
+                    shared.rmdir()
+                except OSError:
+                    pass
         raise
 
     for name, _ in links:
         print(f"Linked skill: {name}")
-
-    for name, copy in redundant:
-        target = shared / name
-        backup = copy.with_name(f".{name}.before-sharing-{uuid.uuid4().hex[:12]}")
-        copy.rename(backup)
-        try:
-            copy.symlink_to(target, target_is_directory=True)
-        except OSError:
-            backup.rename(copy)
-            raise
+    for name, copy, backup, _ in converted:
         print(f"Unified skill: {name} in {copy.parent}; backup: {backup}")
 
     for (home, market), spec in market_additions.items():

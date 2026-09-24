@@ -172,12 +172,14 @@ not treated as proof of installation. It calls
 the installed state again afterward. It first adds any missing configured
 custom marketplace through `codex plugin marketplace add`. A missing built-in
 marketplace makes the run stop before writing: initialize that Codex home with
-the vendor app or CLI, then rerun the tool. A plugin that the CLI does not list
-with an installable policy (`AVAILABLE` or `INSTALLED_BY_DEFAULT`) also stops
-the run before writing, even if it appears in the `available` array. It does
-not copy plugin caches or edit TOML directly. For a local marketplace, the
-source must contain `.agents/plugins/marketplace.json` with the configured name
-and an installable entry for each plugin being added. Installation may require
+the vendor app or CLI, then rerun the tool. Where a target already has the
+marketplace, a plugin that its CLI does not list with an installable policy
+(`AVAILABLE` or `INSTALLED_BY_DEFAULT`) stops the run before writing, even if it
+appears in the `available` array. Where the tool must add a marketplace first,
+it checks the source home's policy; a local marketplace must also contain
+`.agents/plugins/marketplace.json` with the configured name and an installable
+entry for each plugin being added. The tool does not copy plugin caches or edit
+TOML directly. Installation may require
 network access; a successful install does not authenticate a connected service.
 Open a new task in each running Codex instance to check the result. Re-run the
 command to pick up newly enabled plugins.

@@ -1,11 +1,16 @@
 """Containment tests for the optional Codex extension sharing tool."""
 
+from contextlib import redirect_stdout
+import importlib.util
+import io
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "tools" / "share-codex-extensions.py"
@@ -57,7 +62,7 @@ elif args == ['plugin', 'marketplace', 'list', '--json']:
     print(json.dumps({'marketplaces': [
         {'name': name} for name in sorted(data.get('marketplaces', {}))]}))
 elif args[:3] == ['plugin', 'marketplace', 'add']:
-    source = args[3]
+    source = str(pathlib.Path(args[3]).resolve())
     name = pathlib.Path(source).name
     with config.open('a') as file:
         file.write(f'\n[marketplaces.{name}]\nsource_type = "local"\nsource = "{source}"\n')
@@ -223,6 +228,74 @@ else:
         self.assertEqual((self.homes[1] / "skills" / "same-name" / "SKILL.md").read_text(), "updated")
         self.assertIn("Local skill copies to unify: 0", self.run_tool().stdout)
 
+    def test_removed_source_skill_reports_broken_links_on_rerun(self):
+        for home in self.homes:
+            skill = home / "skills" / "same-name"
+            skill.mkdir()
+            (skill / "SKILL.md").write_text("initial")
+        applied = self.run_tool("--apply")
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        shutil.rmtree(self.homes[0] / "skills" / "same-name")
+        rerun = self.run_tool("--apply")
+        self.assertNotEqual(rerun.returncode, 0)
+        self.assertIn("broken skill link", rerun.stderr)
+        self.assertFalse((self.shared / "same-name").exists())
+        self.assertEqual(len(list((self.homes[1] / "skills").glob(
+            ".same-name.before-sharing-*"))), 1)
+
+    @unittest.skipIf(os.geteuid() == 0, "root can write mode 555 directories")
+    def test_unwritable_copy_directory_refuses_before_shared_link(self):
+        for home in self.homes:
+            skill = home / "skills" / "same-name"
+            skill.mkdir()
+            (skill / "SKILL.md").write_text("initial")
+        directory = self.homes[1] / "skills"
+        directory.chmod(0o555)
+        try:
+            result = self.run_tool("--apply")
+        finally:
+            directory.chmod(0o755)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unwritable directory", result.stderr)
+        self.assertFalse(self.shared.exists())
+        self.assertTrue((directory / "same-name").is_dir())
+
+    def test_late_copy_failure_rolls_back_earlier_unifications(self):
+        third = self.root / "third"
+        (third / "skills").mkdir(parents=True)
+        for home in (*self.homes, third):
+            skill = home / "skills" / "same-name"
+            skill.mkdir()
+            (skill / "SKILL.md").write_text("initial")
+        spec = importlib.util.spec_from_file_location("share_codex_extensions", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        original_rename = Path.rename
+        failing_copy = third / "skills" / "same-name"
+
+        def refuse_late_rename(path, target):
+            if path.resolve() == failing_copy.resolve():
+                raise PermissionError("simulated late rename failure")
+            return original_rename(path, target)
+
+        arguments = [str(SCRIPT), *[item for home in (*self.homes, third)
+                                    for item in ("--home", str(home))],
+                     "--shared-skills", str(self.shared), "--codex-bin", str(self.cli),
+                     "--apply"]
+        with patch.dict(os.environ, {"HOME": str(self.root)}), \
+                patch.object(sys, "argv", arguments), \
+                patch.object(Path, "rename", refuse_late_rename), \
+                redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(PermissionError, "simulated late rename"):
+                module.main()
+        self.assertFalse(self.shared.exists())
+        for home in (*self.homes, third):
+            copy = home / "skills" / "same-name"
+            self.assertTrue(copy.is_dir())
+            self.assertFalse(copy.is_symlink())
+            self.assertEqual((copy / "SKILL.md").read_text(), "initial")
+            self.assertEqual(list((home / "skills").glob(".same-name.before-sharing-*")), [])
+
     def test_custom_marketplace_is_added_before_plugin(self):
         market = self.root / "team"
         market.mkdir()
@@ -240,6 +313,25 @@ else:
         self.assertIn("[marketplaces.team]", config)
         self.assertIn('[plugins."sample@team"]', config)
         self.assertIn("Marketplaces to add: 0", self.run_tool().stdout)
+
+    def test_local_marketplace_source_alias_is_idempotent(self):
+        market = self.root / "team"
+        manifest = market / ".agents" / "plugins" / "marketplace.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text('{"name":"team","plugins":[{"name":"sample",'
+                            '"policy":{"installation":"AVAILABLE"}}]}')
+        alias = self.root / "team-alias"
+        alias.symlink_to(market, target_is_directory=True)
+        (self.homes[0] / "config.toml").write_text(
+            f'[marketplaces.team]\nsource_type = "local"\nsource = "{alias}"\n'
+            '[plugins."sample@team"]\nenabled = true\n'
+        )
+        applied = self.run_tool("--apply")
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        rerun = self.run_tool()
+        self.assertEqual(rerun.returncode, 0, rerun.stderr)
+        self.assertIn("Marketplaces to add: 0", rerun.stdout)
+        self.assertIn("Plugin installations: 0", rerun.stdout)
 
     def test_not_installable_local_marketplace_refuses_before_skill_links(self):
         skill = self.homes[0] / "skills" / "source-skill"
