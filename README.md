@@ -154,14 +154,20 @@ The tool requires Python 3.11+ and a Codex CLI with `codex plugin add`. It links
 top-level user skills with a `SKILL.md` from each home into
 `~/.agents/skills`, so edits to the original skill are visible to both profiles.
 It leaves system and plugin-bundled skills alone. An existing shared skill with
-different contents is a conflict and stops the run before any changes.
+different contents is a conflict and stops the run before any changes. If the
+same skill already has identical local copies, the tool replaces redundant
+copies with links to the shared version and keeps each original as a hidden
+`before-sharing` backup beside it. This prevents later edits from leaving a
+stale copy in one profile.
 
 For plugins, it takes the union of entries explicitly set to `enabled = true`
 in each home's `config.toml`, then calls `codex plugin add` with that home's
-`CODEX_HOME` for missing entries. It does not copy plugin caches or edit TOML
-directly. Installation may require network access; a successful install does not
-authenticate a connected service. Open a new task in each running Codex instance
-to check the result. Re-run the command to pick up newly enabled plugins.
+`CODEX_HOME` for missing entries. It first adds any missing configured
+marketplace through `codex plugin marketplace add`. It does not copy plugin
+caches or edit TOML directly. Installation may require network access; a
+successful install does not authenticate a connected service. Open a new task
+in each running Codex instance to check the result. Re-run the command to pick
+up newly enabled plugins.
 
 This is extension sharing only. Account logins, sessions, MCP server definitions,
 and MCP OAuth credentials remain in their respective profile stores.

@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tomllib
+import uuid
 
 
 def die(message: str) -> None:
@@ -21,6 +22,8 @@ def die(message: str) -> None:
 def skill_digest(directory: Path) -> str:
     """Compare the complete skill, including scripts and other resources."""
     digest = hashlib.sha256()
+    skill_root = directory.resolve(strict=True)
+    digest.update(str(skill_root.stat().st_mode & 0o777).encode() + b"\0")
     for root, dirs, files in os.walk(directory, followlinks=False):
         dirs.sort()
         for name in sorted(dirs + files):
@@ -28,11 +31,18 @@ def skill_digest(directory: Path) -> str:
             relative = path.relative_to(directory).as_posix()
             digest.update(relative.encode())
             if path.is_symlink():
+                try:
+                    resolved = path.resolve(strict=True)
+                except (OSError, RuntimeError) as error:
+                    die(f"cannot resolve link in skill {path}: {error}")
+                if not resolved.is_relative_to(skill_root):
+                    die(f"skill link escapes its directory: {path}")
                 digest.update(b"link\0" + os.readlink(path).encode())
             elif path.is_file():
-                digest.update(b"file\0" + path.read_bytes())
+                digest.update(b"file\0" + str(path.stat().st_mode & 0o777).encode()
+                              + b"\0" + path.read_bytes())
             elif path.is_dir():
-                digest.update(b"dir\0")
+                digest.update(b"dir\0" + str(path.stat().st_mode & 0o777).encode())
             else:
                 die(f"unsupported entry in skill: {path}")
     return digest.hexdigest()
@@ -49,21 +59,52 @@ def user_skills(home: Path) -> dict[str, Path]:
     }
 
 
-def enabled_plugins(home: Path) -> set[str]:
+def codex_config(home: Path) -> dict:
     config = home / "config.toml"
     if not config.is_file():
-        return set()
+        return {}
     try:
-        data = tomllib.loads(config.read_text())
+        return tomllib.loads(config.read_text())
     except (OSError, ValueError) as error:
         die(f"cannot parse {config}: {error}")
+
+
+def enabled_plugins(home: Path) -> set[str]:
+    data = codex_config(home)
     plugins = data.get("plugins", {})
     if not isinstance(plugins, dict):
-        die(f"[plugins] is not a table in {config}")
+        die(f"[plugins] is not a table in {home / 'config.toml'}")
     return {
         name for name, settings in plugins.items()
         if isinstance(settings, dict) and settings.get("enabled") is True
     }
+
+
+def marketplaces(home: Path) -> dict:
+    entries = codex_config(home).get("marketplaces", {})
+    if not isinstance(entries, dict):
+        die(f"[marketplaces] is not a table in {home / 'config.toml'}")
+    return entries
+
+
+def marketplace_add_args(name: str, spec: dict) -> list[str]:
+    source = spec.get("source")
+    kind = spec.get("source_type")
+    if not isinstance(source, str) or not source or kind not in ("local", "git"):
+        die(f"unsupported marketplace definition for {name!r}; configure it manually")
+    args = ["plugin", "marketplace", "add", source]
+    if kind == "git":
+        ref = spec.get("ref")
+        if ref:
+            if not isinstance(ref, str):
+                die(f"invalid ref for marketplace {name!r}")
+            args += ["--ref", ref]
+        sparse = spec.get("sparse_paths", [])
+        if not isinstance(sparse, list) or not all(isinstance(p, str) for p in sparse):
+            die(f"invalid sparse paths for marketplace {name!r}")
+        for path in sparse:
+            args += ["--sparse", path]
+    return args
 
 
 def main() -> None:
@@ -93,29 +134,73 @@ def main() -> None:
     if shared.exists() and not shared.is_dir():
         die(f"shared skills path is not a directory: {shared}")
 
-    sources: dict[str, Path] = {}
+    sources: dict[str, list[Path]] = {}
     for home in homes:
         for name, path in user_skills(home).items():
-            if name in sources and skill_digest(sources[name]) != skill_digest(path):
-                die(f"skill {name!r} differs between {sources[name]} and {path}; resolve it first")
-            sources.setdefault(name, path)
+            if shared.resolve().is_relative_to(path.resolve()):
+                die(f"shared skills directory is inside source skill: {shared} in {path}")
+            if (name in sources and sources[name][0].resolve() != path.resolve()
+                    and skill_digest(sources[name][0]) != skill_digest(path)):
+                die(f"skill {name!r} differs between {sources[name][0]} and {path}; resolve it first")
+            sources.setdefault(name, []).append(path)
 
     links: list[tuple[str, Path]] = []
-    for name, source in sorted(sources.items()):
+    redundant: list[tuple[str, Path]] = []
+    for name, copies in sorted(sources.items()):
+        source = copies[0]
         target = shared / name
         if target.is_symlink() and not target.exists():
             die(f"broken shared skill link: {target}")
         if target.exists():
             if not (target / "SKILL.md").is_file():
                 die(f"existing shared entry is not a skill: {target}")
-            if skill_digest(target) != skill_digest(source):
+            if target.resolve() != source.resolve() and skill_digest(target) != skill_digest(source):
                 die(f"shared skill {target} differs from {source}; resolve it first")
         else:
             links.append((name, source))
 
+        canonical = target if target.exists() else source
+        redundant += [(name, copy) for copy in copies
+                      if copy.resolve() != canonical.resolve()]
+
     current = {home: enabled_plugins(home) for home in homes}
     desired = set().union(*current.values())
     installs = [(home, plugin) for home in homes for plugin in sorted(desired - current[home])]
+    configured_markets = {home: marketplaces(home) for home in homes}
+    market_additions: dict[tuple[Path, str], dict] = {}
+    builtin_markets = {"openai-bundled", "openai-primary-runtime"}
+    market_specs: dict[str, dict] = {}
+    for plugin in sorted(desired):
+        if "@" not in plugin:
+            die(f"plugin ID lacks a marketplace: {plugin!r}")
+        market = plugin.rsplit("@", 1)[1]
+        if market in builtin_markets:
+            continue
+        definitions = [(source, configured_markets[source][market]) for source in homes
+                       if market in configured_markets[source]]
+        if not definitions:
+            continue  # Account-level marketplace; let Codex resolve it.
+        spec = definitions[0][1]
+        for source_home, other in definitions:
+            if not isinstance(other, dict):
+                die(f"invalid marketplace {market!r} in {source_home / 'config.toml'}")
+            if other != spec:
+                die(f"marketplace {market!r} has conflicting sources in {definitions[0][0]} and {source_home}")
+        if any(plugin in current[source] and market not in configured_markets[source]
+               for source in homes):
+            die(f"cannot verify marketplace {market!r} for every source of {plugin!r}")
+        marketplace_add_args(market, spec)  # Validate before making any changes.
+        market_specs[market] = spec
+
+    for home, plugin in installs:
+        market = plugin.rsplit("@", 1)[1]
+        spec = market_specs.get(market)
+        if spec is None:
+            continue  # Built-in or account-level marketplace; let Codex resolve it.
+        if market in configured_markets[home]:
+            continue
+        key = (home, market)
+        market_additions[key] = spec
 
     print("Homes:")
     for home in homes:
@@ -124,6 +209,12 @@ def main() -> None:
     print(f"Skill links to create: {len(links)}")
     for name, source in links:
         print(f"  {name}: {shared / name} -> {source}")
+    print(f"Local skill copies to unify: {len(redundant)}")
+    for name, copy in redundant:
+        print(f"  {copy} -> {shared / name} (original kept as a hidden backup)")
+    print(f"Marketplaces to add: {len(market_additions)}")
+    for home, market in market_additions:
+        print(f"  {home}: {market}")
     print(f"Plugin installations: {len(installs)}")
     for home, plugin in installs:
         print(f"  {home}: {plugin}")
@@ -132,7 +223,7 @@ def main() -> None:
         return
 
     codex = shutil.which(args.codex_bin)
-    if installs and codex is None:
+    if (installs or market_additions) and codex is None:
         die(f"Codex CLI not found: {args.codex_bin}")
     if links:
         shared.mkdir(parents=True, exist_ok=True)
@@ -142,6 +233,29 @@ def main() -> None:
             die(f"shared skill appeared during apply: {target}")
         target.symlink_to(source, target_is_directory=True)
         print(f"Linked skill: {name}")
+
+    for name, copy in redundant:
+        target = shared / name
+        if skill_digest(copy) != skill_digest(target):
+            die(f"skill changed during apply: {copy}")
+        backup = copy.with_name(f".{name}.before-sharing-{uuid.uuid4().hex[:12]}")
+        copy.rename(backup)
+        try:
+            copy.symlink_to(target, target_is_directory=True)
+        except OSError:
+            backup.rename(copy)
+            raise
+        print(f"Unified skill: {name} in {copy.parent}; backup: {backup}")
+
+    for (home, market), spec in market_additions.items():
+        env = os.environ.copy()
+        env["CODEX_HOME"] = str(home)
+        command = [codex, *marketplace_add_args(market, spec)]
+        result = subprocess.run(command, env=env, stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True)
+        if result.returncode or market not in marketplaces(home):
+            die(f"could not add marketplace {market!r} to {home}; successful changes remain")
+        print(f"Added marketplace: {market} to {home}")
 
     failed = []
     for home, plugin in installs:
