@@ -40,6 +40,8 @@ marker = home / '.installed-plugins'
 installed = set(marker.read_text().splitlines()) if marker.exists() else set()
 catalog = home / '.available-plugins'
 available = set(catalog.read_text().splitlines()) if catalog.exists() else set()
+implicit_marker = home / '.implicit-marketplaces.json'
+implicit = json.loads(implicit_marker.read_text()) if implicit_marker.exists() else {}
 blocked_marker = home / '.not-installable-plugins'
 blocked = set(blocked_marker.read_text().splitlines()) if blocked_marker.exists() else set()
 def policy(name):
@@ -59,8 +61,15 @@ if args == ['plugin', 'list', '--available', '--json']:
         'available': [{'pluginId': name, 'installPolicy': policy(name)}
                       for name in sorted(available - installed)]}))
 elif args == ['plugin', 'marketplace', 'list', '--json']:
+    configured = data.get('marketplaces', {})
     print(json.dumps({'marketplaces': [
-        {'name': name} for name in sorted(data.get('marketplaces', {}))]}))
+        {'name': name, 'marketplaceSource': {
+            'sourceType': spec.get('source_type'),
+            'source': str(pathlib.Path(spec.get('source', '')).expanduser().resolve())}}
+        for name, spec in sorted(configured.items())] + [
+        {'name': name, 'marketplaceSource': {
+            'sourceType': 'local', 'source': str(pathlib.Path(source).resolve())}}
+        for name, source in sorted(implicit.items()) if name not in configured]}))
 elif args[:3] == ['plugin', 'marketplace', 'add']:
     source = str(pathlib.Path(args[3]).resolve())
     name = pathlib.Path(source).name
@@ -72,7 +81,7 @@ elif args[:2] == ['plugin', 'add']:
         raise SystemExit('plugin not available for install')
     market = name.rsplit('@', 1)[-1]
     if market in ('team', 'openai-bundled', 'openai-primary-runtime'):
-        assert market in data.get('marketplaces', {}), 'marketplace unavailable'
+        assert market in data.get('marketplaces', {}) or market in implicit, 'marketplace unavailable'
     if name not in data.get('plugins', {}):
         with config.open('a') as file:
             file.write(f'\n[plugins."{name}"]\nenabled = true\n')
@@ -301,7 +310,11 @@ else:
         market.mkdir()
         manifest = market / ".agents" / "plugins" / "marketplace.json"
         manifest.parent.mkdir(parents=True)
+        plugin_dir = market / "plugins" / "sample"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "plugin.json").write_text('{"name":"sample"}')
         manifest.write_text('{"name":"team","plugins":[{"name":"sample",'
+                            '"source":{"source":"local","path":"./plugins/sample"},'
                             '"policy":{"installation":"AVAILABLE"}}]}')
         (self.homes[0] / "config.toml").write_text(
             f'[marketplaces.team]\nsource_type = "local"\nsource = "{market}"\n'
@@ -318,7 +331,11 @@ else:
         market = self.root / "team"
         manifest = market / ".agents" / "plugins" / "marketplace.json"
         manifest.parent.mkdir(parents=True)
+        plugin_dir = market / "plugins" / "sample"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "plugin.json").write_text('{"name":"sample"}')
         manifest.write_text('{"name":"team","plugins":[{"name":"sample",'
+                            '"source":{"source":"local","path":"./plugins/sample"},'
                             '"policy":{"installation":"AVAILABLE"}}]}')
         alias = self.root / "team-alias"
         alias.symlink_to(market, target_is_directory=True)
@@ -332,6 +349,97 @@ else:
         self.assertEqual(rerun.returncode, 0, rerun.stderr)
         self.assertIn("Marketplaces to add: 0", rerun.stdout)
         self.assertIn("Plugin installations: 0", rerun.stdout)
+
+    def test_existing_cli_marketplace_same_source_is_reused(self):
+        market = self.root / "team"
+        manifest = market / ".agents" / "plugins" / "marketplace.json"
+        manifest.parent.mkdir(parents=True)
+        plugin_dir = market / "plugins" / "sample"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "plugin.json").write_text('{"name":"sample"}')
+        manifest.write_text('{"name":"team","plugins":[{"name":"sample",'
+                            '"source":{"source":"local","path":"./plugins/sample"},'
+                            '"policy":{"installation":"AVAILABLE"}}]}')
+        (self.homes[0] / "config.toml").write_text(
+            f'[marketplaces.team]\nsource_type = "local"\nsource = "{market}"\n'
+            '[plugins."sample@team"]\nenabled = true\n'
+        )
+        (self.homes[1] / ".implicit-marketplaces.json").write_text(
+            f'{{"team":"{market}"}}'
+        )
+        applied = self.run_tool("--apply")
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        self.assertIn("Marketplaces to add: 0", applied.stdout)
+        self.assertNotIn("[marketplaces.team]", (self.homes[1] / "config.toml").read_text())
+        self.assertIn("Plugin installations: 0", self.run_tool().stdout)
+
+    def test_existing_cli_marketplace_other_source_refuses_before_links(self):
+        skill = self.homes[0] / "skills" / "source-skill"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text("safe")
+        market = self.root / "team"
+        manifest = market / ".agents" / "plugins" / "marketplace.json"
+        manifest.parent.mkdir(parents=True)
+        plugin_dir = market / "plugins" / "sample"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "plugin.json").write_text('{"name":"sample"}')
+        manifest.write_text('{"name":"team","plugins":[{"name":"sample",'
+                            '"source":{"source":"local","path":"./plugins/sample"},'
+                            '"policy":{"installation":"AVAILABLE"}}]}')
+        (self.homes[0] / "config.toml").write_text(
+            f'[marketplaces.team]\nsource_type = "local"\nsource = "{market}"\n'
+            '[plugins."sample@team"]\nenabled = true\n'
+        )
+        (self.homes[1] / ".implicit-marketplaces.json").write_text(
+            f'{{"team":"{self.root / "other-team"}"}}'
+        )
+        result = self.run_tool("--apply")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("already exists from another or unknown source", result.stderr)
+        self.assertFalse(self.shared.exists())
+        self.assertFalse((self.homes[1] / "config.toml").exists())
+
+    def test_missing_local_plugin_source_refuses_before_links(self):
+        skill = self.homes[0] / "skills" / "source-skill"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text("safe")
+        market = self.root / "team"
+        manifest = market / ".agents" / "plugins" / "marketplace.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text('{"name":"team","plugins":[{"name":"sample",'
+                            '"source":"./missing",'
+                            '"policy":{"installation":"AVAILABLE"}}]}')
+        (self.homes[0] / "config.toml").write_text(
+            f'[marketplaces.team]\nsource_type = "local"\nsource = "{market}"\n'
+            '[plugins."sample@team"]\nenabled = true\n'
+        )
+        result = self.run_tool("--apply")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("local source is missing", result.stderr)
+        self.assertFalse(self.shared.exists())
+        self.assertFalse((self.homes[1] / "config.toml").exists())
+
+    def test_wrong_local_plugin_manifest_refuses_before_links(self):
+        skill = self.homes[0] / "skills" / "source-skill"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text("safe")
+        market = self.root / "team"
+        manifest = market / ".agents" / "plugins" / "marketplace.json"
+        manifest.parent.mkdir(parents=True)
+        plugin_dir = market / "plugins" / "sample"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "plugin.json").write_text('{"name":"other"}')
+        manifest.write_text('{"name":"team","plugins":[{"name":"sample",'
+                            '"source":{"source":"local","path":"./plugins/sample"},'
+                            '"policy":{"installation":"AVAILABLE"}}]}')
+        (self.homes[0] / "config.toml").write_text(
+            f'[marketplaces.team]\nsource_type = "local"\nsource = "{market}"\n'
+            '[plugins."sample@team"]\nenabled = true\n'
+        )
+        result = self.run_tool("--apply")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("is not named 'sample'", result.stderr)
+        self.assertFalse(self.shared.exists())
 
     def test_not_installable_local_marketplace_refuses_before_skill_links(self):
         skill = self.homes[0] / "skills" / "source-skill"

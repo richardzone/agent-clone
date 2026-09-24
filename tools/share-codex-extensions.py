@@ -141,14 +141,17 @@ def active_plugins(codex: str, home: Path) -> set[str]:
     return plugin_inventory(codex, home)[0]
 
 
-def listed_marketplaces(codex: str, home: Path) -> set[str]:
+def listed_marketplaces(codex: str, home: Path) -> dict[str, dict]:
     entries = cli_json(codex, home, ["marketplace", "list"]).get("marketplaces")
     if not isinstance(entries, list):
         die(f"invalid Codex marketplace list in {home}: missing marketplaces array")
     if any(not isinstance(item, dict) or not isinstance(item.get("name"), str)
            for item in entries):
         die(f"invalid marketplace entry in {home}")
-    return {item["name"] for item in entries}
+    names = [item["name"] for item in entries]
+    if len(names) != len(set(names)):
+        die(f"duplicate marketplaces in Codex CLI listing for {home}")
+    return {item["name"]: item for item in entries}
 
 
 def marketplace_add_args(name: str, spec: dict) -> list[str]:
@@ -179,6 +182,16 @@ def marketplace_identity(name: str, spec: dict) -> tuple:
     return ("git", source, spec.get("ref"), tuple(sorted(spec.get("sparse_paths", []))))
 
 
+def listed_marketplace_identity(entry: dict) -> tuple | None:
+    source = entry.get("marketplaceSource")
+    if not isinstance(source, dict) or source.get("sourceType") != "local":
+        return None
+    path = source.get("source")
+    if not isinstance(path, str) or not path:
+        return None
+    return ("local", str(Path(path).expanduser().resolve()))
+
+
 def validate_local_marketplace(name: str, spec: dict, plugin: str) -> None:
     if spec.get("source_type") != "local":
         return
@@ -199,6 +212,30 @@ def validate_local_marketplace(name: str, spec: dict, plugin: str) -> None:
         die(f"plugin {plugin!r} is missing or ambiguous in local marketplace {manifest}")
     if matches[0]["policy"].get("installation") not in INSTALLABLE_POLICIES:
         die(f"plugin {plugin!r} is not installable in local marketplace {manifest}")
+    source = matches[0].get("source")
+    if isinstance(source, dict) and source.get("source") == "local":
+        source = source.get("path")
+    elif isinstance(source, dict) and source.get("source") in ("url", "git-subdir", "npm"):
+        return  # Git/npm-backed entries cannot be checked as local paths.
+    elif not isinstance(source, str):
+        die(f"plugin {plugin!r} has no supported source in {manifest}")
+    if not isinstance(source, str) or not source.startswith("./"):
+        die(f"plugin {plugin!r} has an invalid local source in {manifest}")
+    root = manifest.parent.parent.parent
+    plugin_dir = (root / source).resolve()
+    if not plugin_dir.is_relative_to(root.resolve()) or not plugin_dir.is_dir():
+        die(f"plugin {plugin!r} local source is missing or escapes {root}: {source}")
+    plugin_manifest = plugin_dir / "plugin.json"
+    if not plugin_manifest.is_file():
+        plugin_manifest = plugin_dir / ".codex-plugin" / "plugin.json"
+    if not plugin_manifest.is_file():
+        die(f"plugin {plugin!r} local source has no plugin manifest: {plugin_dir}")
+    try:
+        plugin_data = json.loads(plugin_manifest.read_text())
+    except (OSError, ValueError) as error:
+        die(f"cannot read plugin manifest {plugin_manifest}: {error}")
+    if not isinstance(plugin_data, dict) or plugin_data.get("name") != plugin_name:
+        die(f"plugin manifest {plugin_manifest} is not named {plugin_name!r}")
 
 
 def main() -> None:
@@ -293,11 +330,11 @@ def main() -> None:
     configured_markets = {home: marketplaces(home) for home in homes}
     market_additions: dict[tuple[Path, str], dict] = {}
     builtin_markets = {"openai-bundled", "openai-primary-runtime"}
+    cli_markets = {home: listed_marketplaces(codex, home) for home in homes}
     if any(plugin.rsplit("@", 1)[-1] in builtin_markets for plugin in desired):
-        builtin_available = {home: listed_marketplaces(codex, home) for home in homes}
         for home, plugin in installs:
             market = plugin.rsplit("@", 1)[-1]
-            if market in builtin_markets and market not in builtin_available[home]:
+            if market in builtin_markets and market not in cli_markets[home]:
                 die(f"built-in marketplace {market!r} is unavailable in {home}; "
                     "initialize that Codex home and retry before applying changes")
     market_specs: dict[str, dict] = {}
@@ -317,9 +354,15 @@ def main() -> None:
                 die(f"invalid marketplace {market!r} in {source_home / 'config.toml'}")
             if marketplace_identity(market, other) != marketplace_identity(market, spec):
                 die(f"marketplace {market!r} has conflicting sources in {definitions[0][0]} and {source_home}")
-        if any(plugin in current[source] and market not in configured_markets[source]
-               for source in homes):
-            die(f"cannot verify marketplace {market!r} for every source of {plugin!r}")
+        identity = marketplace_identity(market, spec)
+        for source_home in homes:
+            entry = cli_markets[source_home].get(market)
+            listed_identity = listed_marketplace_identity(entry) if entry else None
+            if market in configured_markets[source_home]:
+                if listed_identity is not None and listed_identity != identity:
+                    die(f"Codex lists a different source for marketplace {market!r} in {source_home}")
+            elif plugin in current[source_home] and listed_identity != identity:
+                die(f"cannot verify marketplace {market!r} for every source of {plugin!r}")
         marketplace_add_args(market, spec)  # Validate before making any changes.
         if any(plugin in desired - installed[home] for home in homes):
             validate_local_marketplace(market, spec, plugin)
@@ -333,6 +376,11 @@ def main() -> None:
         if spec is None:
             continue  # Built-in or account-level marketplace; let Codex resolve it.
         if market in configured_markets[home]:
+            continue
+        entry = cli_markets[home].get(market)
+        if entry:
+            if listed_marketplace_identity(entry) != marketplace_identity(market, spec):
+                die(f"marketplace {market!r} already exists from another or unknown source in {home}")
             continue
         key = (home, market)
         market_additions[key] = spec
