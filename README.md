@@ -172,14 +172,15 @@ not treated as proof of installation. It calls
 the installed state again afterward. It first adds any missing configured
 custom marketplace through `codex plugin marketplace add`. A missing built-in
 marketplace makes the run stop before writing: initialize that Codex home with
-the vendor app or CLI, then rerun the tool. A plugin missing from a target's
-installed and available lists likewise stops the run before writing. It does
+the vendor app or CLI, then rerun the tool. A plugin that the CLI does not list
+with an installable policy (`AVAILABLE` or `INSTALLED_BY_DEFAULT`) also stops
+the run before writing, even if it appears in the `available` array. It does
 not copy plugin caches or edit TOML directly. For a local marketplace, the
-source must contain `.agents/plugins/marketplace.json` with the configured
-name. Installation may require network access; a successful install does not
-authenticate a connected service. Open a
-new task in each running Codex instance to check the result. Re-run the command
-to pick up newly enabled plugins.
+source must contain `.agents/plugins/marketplace.json` with the configured name
+and an installable entry for each plugin being added. Installation may require
+network access; a successful install does not authenticate a connected service.
+Open a new task in each running Codex instance to check the result. Re-run the
+command to pick up newly enabled plugins.
 
 This is extension sharing only. Account logins, sessions, MCP server definitions,
 and MCP OAuth credentials remain in their respective profile stores.

@@ -17,6 +17,9 @@ import unicodedata
 import uuid
 
 
+INSTALLABLE_POLICIES = {"AVAILABLE", "INSTALLED_BY_DEFAULT"}
+
+
 def die(message: str) -> None:
     raise SystemExit(f"ERROR: {message}")
 
@@ -126,8 +129,9 @@ def plugin_inventory(codex: str, home: Path) -> tuple[set[str], set[str]]:
         die(f"invalid plugin entry in {home}")
     active = {item["pluginId"] for item in installed
               if item.get("installed") is True and item.get("enabled") is True}
-    known = {item["pluginId"] for item in installed + available}
-    return active, known
+    installable = {item["pluginId"] for item in installed + available
+                   if item.get("installPolicy") in INSTALLABLE_POLICIES}
+    return active, installable
 
 
 def active_plugins(codex: str, home: Path) -> set[str]:
@@ -164,7 +168,7 @@ def marketplace_add_args(name: str, spec: dict) -> list[str]:
     return args
 
 
-def validate_local_marketplace(name: str, spec: dict) -> None:
+def validate_local_marketplace(name: str, spec: dict, plugin: str) -> None:
     if spec.get("source_type") != "local":
         return
     manifest = Path(spec["source"]).expanduser() / ".agents" / "plugins" / "marketplace.json"
@@ -174,6 +178,16 @@ def validate_local_marketplace(name: str, spec: dict) -> None:
         die(f"cannot read local marketplace {name!r} at {manifest}: {error}")
     if not isinstance(data, dict) or data.get("name") != name:
         die(f"local marketplace at {manifest} is not named {name!r}")
+    entries = data.get("plugins")
+    plugin_name = plugin.rsplit("@", 1)[0]
+    if not isinstance(entries, list):
+        die(f"local marketplace at {manifest} has no plugin list")
+    matches = [entry for entry in entries
+               if isinstance(entry, dict) and entry.get("name") == plugin_name]
+    if len(matches) != 1 or not isinstance(matches[0].get("policy"), dict):
+        die(f"plugin {plugin!r} is missing or ambiguous in local marketplace {manifest}")
+    if matches[0]["policy"].get("installation") not in INSTALLABLE_POLICIES:
+        die(f"plugin {plugin!r} is not installable in local marketplace {manifest}")
 
 
 def main() -> None:
@@ -259,7 +273,7 @@ def main() -> None:
         die(f"Codex CLI not found: {args.codex_bin}")
     inventory = {home: plugin_inventory(codex, home) for home in homes}
     installed = {home: inventory[home][0] for home in homes}
-    known = {home: inventory[home][1] for home in homes}
+    installable = {home: inventory[home][1] for home in homes}
     current = {home: enabled_plugins(home) | installed[home] for home in homes}
     desired = set().union(*current.values())
     installs = [(home, plugin) for home in homes for plugin in sorted(desired - installed[home])]
@@ -295,7 +309,9 @@ def main() -> None:
             die(f"cannot verify marketplace {market!r} for every source of {plugin!r}")
         marketplace_add_args(market, spec)  # Validate before making any changes.
         if any(plugin in desired - installed[home] for home in homes):
-            validate_local_marketplace(market, spec)
+            validate_local_marketplace(market, spec, plugin)
+            if not any(plugin in installable[source_home] for source_home, _ in definitions):
+                die(f"plugin {plugin!r} is not installable in its source marketplace")
         market_specs[market] = spec
 
     for home, plugin in installs:
@@ -310,9 +326,10 @@ def main() -> None:
 
     for home, plugin in installs:
         market = plugin.rsplit("@", 1)[1]
-        if (home, market) not in market_additions and plugin not in known[home]:
-            die(f"plugin {plugin!r} is unavailable in {home}; configure its "
-                "marketplace or sign in to its account-level catalog before applying changes")
+        if (home, market) not in market_additions and plugin not in installable[home]:
+            die(f"plugin {plugin!r} is unavailable or not installable in {home}; "
+                "configure its marketplace or sign in to its account-level catalog "
+                "before applying changes")
 
     print("Homes:")
     for home in homes:
