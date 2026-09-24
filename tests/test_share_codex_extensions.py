@@ -36,7 +36,13 @@ installed = set(marker.read_text().splitlines()) if marker.exists() else set()
 catalog = home / '.available-plugins'
 available = set(catalog.read_text().splitlines()) if catalog.exists() else set()
 args = sys.argv[1:]
-if args == ['plugin', 'list', '--json']:
+if args == ['plugin', 'list', '--available', '--json']:
+    mutate = os.environ.get('FAKE_CODEX_MUTATE_SKILL')
+    if mutate:
+        changed = home / '.mutated-skill-once'
+        if not changed.exists():
+            pathlib.Path(mutate).write_text('changed during plugin query')
+            changed.write_text('done')
     print(json.dumps({'installed': [
         {'pluginId': name, 'installed': True,
          'enabled': data.get('plugins', {}).get(name, {}).get('enabled') is True}
@@ -199,6 +205,9 @@ else:
     def test_custom_marketplace_is_added_before_plugin(self):
         market = self.root / "team"
         market.mkdir()
+        manifest = market / ".agents" / "plugins" / "marketplace.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text('{"name":"team","plugins":[]}')
         (self.homes[0] / "config.toml").write_text(
             f'[marketplaces.team]\nsource_type = "local"\nsource = "{market}"\n'
             '[plugins."sample@team"]\nenabled = true\n'
@@ -209,6 +218,53 @@ else:
         self.assertIn("[marketplaces.team]", config)
         self.assertIn('[plugins."sample@team"]', config)
         self.assertIn("Marketplaces to add: 0", self.run_tool().stdout)
+
+    def test_invalid_local_marketplace_refuses_before_skill_links(self):
+        skill = self.homes[0] / "skills" / "source-skill"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text("safe")
+        (self.homes[0] / "config.toml").write_text(
+            f'[marketplaces.team]\nsource_type = "local"\nsource = "{self.root / "missing"}"\n'
+            '[plugins."sample@team"]\nenabled = true\n'
+        )
+        result = self.run_tool("--apply")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot read local marketplace", result.stderr)
+        self.assertFalse(self.shared.exists())
+
+    def test_case_insensitive_skill_collision_refuses_before_changes(self):
+        for home, name in zip(self.homes, ("Alpha", "alpha")):
+            skill = home / "skills" / name
+            skill.mkdir()
+            (skill / "SKILL.md").write_text("safe")
+        result = self.run_tool("--apply")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("case-insensitive", result.stderr)
+        self.assertFalse(self.shared.exists())
+
+    def test_skill_change_during_plugin_preflight_refuses_before_links(self):
+        for home in self.homes:
+            skill = home / "skills" / "same-name"
+            skill.mkdir()
+            (skill / "SKILL.md").write_text("initial")
+        first_skill = self.homes[0] / "skills" / "same-name" / "SKILL.md"
+        result = self.run_tool("--apply", env={"FAKE_CODEX_MUTATE_SKILL": str(first_skill)})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("changed during plugin preflight", result.stderr)
+        self.assertFalse(self.shared.exists())
+        self.assertFalse((self.homes[1] / "skills" / "same-name").is_symlink())
+
+    def test_singleton_skill_with_external_link_refuses_before_changes(self):
+        skill = self.homes[0] / "skills" / "source-skill"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text("safe")
+        private = self.homes[0] / "auth.json"
+        private.write_text("secret")
+        (skill / "resource").symlink_to(private)
+        result = self.run_tool("--apply")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("escapes its directory", result.stderr)
+        self.assertFalse(self.shared.exists())
 
     def test_conflicting_marketplace_aborts_before_skill_changes(self):
         for home, source in zip(self.homes, ("source-a", "source-b")):

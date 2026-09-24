@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tomllib
+import unicodedata
 import uuid
 
 
@@ -116,7 +117,7 @@ def cli_json(codex: str, home: Path, command: list[str]) -> dict:
 
 
 def plugin_inventory(codex: str, home: Path) -> tuple[set[str], set[str]]:
-    data = cli_json(codex, home, ["list"])
+    data = cli_json(codex, home, ["list", "--available"])
     installed, available = data.get("installed"), data.get("available")
     if not isinstance(installed, list) or not isinstance(available, list):
         die(f"invalid Codex plugin list in {home}: missing installed or available array")
@@ -163,6 +164,18 @@ def marketplace_add_args(name: str, spec: dict) -> list[str]:
     return args
 
 
+def validate_local_marketplace(name: str, spec: dict) -> None:
+    if spec.get("source_type") != "local":
+        return
+    manifest = Path(spec["source"]).expanduser() / ".agents" / "plugins" / "marketplace.json"
+    try:
+        data = json.loads(manifest.read_text())
+    except (OSError, ValueError) as error:
+        die(f"cannot read local marketplace {name!r} at {manifest}: {error}")
+    if not isinstance(data, dict) or data.get("name") != name:
+        die(f"local marketplace at {manifest} is not named {name!r}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--home", action="append", required=True, type=Path,
@@ -203,8 +216,23 @@ def main() -> None:
                 die(f"skill {name!r} differs between {sources[name][0]} and {path}; resolve it first")
             sources.setdefault(name, []).append(path)
 
+    folded_names: dict[str, str] = {}
+    for name in sources:
+        folded = unicodedata.normalize("NFD", name).casefold()
+        if folded in folded_names and folded_names[folded] != name:
+            die(f"skill names collide on a case-insensitive filesystem: "
+                f"{folded_names[folded]!r} and {name!r}")
+        folded_names[folded] = name
+    if shared.is_dir():
+        for entry in shared.iterdir():
+            folded = unicodedata.normalize("NFD", entry.name).casefold()
+            if folded in folded_names and folded_names[folded] != entry.name:
+                die(f"shared skill name {entry.name!r} collides with "
+                    f"{folded_names[folded]!r}")
+
     links: list[tuple[str, Path]] = []
     redundant: list[tuple[str, Path]] = []
+    link_digests: dict[str, str] = {}
     for name, copies in sorted(sources.items()):
         source = copies[0]
         target = shared / name
@@ -216,11 +244,15 @@ def main() -> None:
             if target.resolve() != source.resolve() and skill_digest(target) != skill_digest(source):
                 die(f"shared skill {target} differs from {source}; resolve it first")
         else:
+            link_digests[name] = skill_digest(source)
             links.append((name, source))
 
         canonical = target if target.exists() else source
         redundant += [(name, copy) for copy in copies
                       if copy.resolve() != canonical.resolve()]
+    redundant_digests = {(name, copy): skill_digest(copy) for name, copy in redundant}
+    target_digests = {name: skill_digest(shared / name) for name, _ in redundant
+                      if (shared / name).exists()}
 
     codex = shutil.which(args.codex_bin)
     if codex is None:
@@ -262,6 +294,8 @@ def main() -> None:
                for source in homes):
             die(f"cannot verify marketplace {market!r} for every source of {plugin!r}")
         marketplace_add_args(market, spec)  # Validate before making any changes.
+        if any(plugin in desired - installed[home] for home in homes):
+            validate_local_marketplace(market, spec)
         market_specs[market] = spec
 
     for home, plugin in installs:
@@ -300,19 +334,49 @@ def main() -> None:
         print("Plan only; pass --apply to make these changes.")
         return
 
-    if links:
-        shared.mkdir(parents=True, exist_ok=True)
+    # CLI inventory calls may take time. Reject changed inputs before the first write.
     for name, source in links:
-        target = shared / name
-        if target.exists() or target.is_symlink():
-            die(f"shared skill appeared during apply: {target}")
-        target.symlink_to(source, target_is_directory=True)
+        if skill_digest(source) != link_digests[name]:
+            die(f"skill changed during plugin preflight: {source}")
+    for (name, copy), digest in redundant_digests.items():
+        if skill_digest(copy) != digest:
+            die(f"skill changed during plugin preflight: {copy}")
+    for name, digest in target_digests.items():
+        if skill_digest(shared / name) != digest:
+            die(f"shared skill changed during plugin preflight: {shared / name}")
+
+    created_links: list[tuple[Path, Path]] = []
+    created_shared = bool(links) and not shared.exists()
+    try:
+        if links:
+            shared.mkdir(parents=True, exist_ok=True)
+        for name, source in links:
+            target = shared / name
+            if target.exists() or target.is_symlink():
+                die(f"shared skill appeared during apply: {target}")
+            target.symlink_to(source, target_is_directory=True)
+            created_links.append((target, source))
+
+        # Check the whole unification batch before renaming any original copy.
+        for (name, copy), digest in redundant_digests.items():
+            if skill_digest(copy) != digest or skill_digest(shared / name) != digest:
+                die(f"skill changed during apply: {copy}")
+    except BaseException:
+        for target, source in reversed(created_links):
+            if target.is_symlink() and target.readlink() == source:
+                target.unlink()
+        if created_shared:
+            try:
+                shared.rmdir()
+            except OSError:
+                pass
+        raise
+
+    for name, _ in links:
         print(f"Linked skill: {name}")
 
     for name, copy in redundant:
         target = shared / name
-        if skill_digest(copy) != skill_digest(target):
-            die(f"skill changed during apply: {copy}")
         backup = copy.with_name(f".{name}.before-sharing-{uuid.uuid4().hex[:12]}")
         copy.rename(backup)
         try:

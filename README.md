@@ -165,16 +165,19 @@ stale copy in one profile.
 
 For plugins, it takes the union of entries explicitly set to `enabled = true`
 in each home's `config.toml` and plugins the Codex CLI reports as installed and
-enabled. Both the plan and apply modes query `codex plugin list --json` for each
-home; a TOML setting alone is not treated as proof of installation. It calls
+enabled. Both the plan and apply modes query
+`codex plugin list --available --json` for each home; a TOML setting alone is
+not treated as proof of installation. It calls
 `codex plugin add` under each target `CODEX_HOME` for missing plugins and checks
 the installed state again afterward. It first adds any missing configured
 custom marketplace through `codex plugin marketplace add`. A missing built-in
 marketplace makes the run stop before writing: initialize that Codex home with
 the vendor app or CLI, then rerun the tool. A plugin missing from a target's
 installed and available lists likewise stops the run before writing. It does
-not copy plugin caches or edit TOML directly. Installation may require network
-access; a successful install does not authenticate a connected service. Open a
+not copy plugin caches or edit TOML directly. For a local marketplace, the
+source must contain `.agents/plugins/marketplace.json` with the configured
+name. Installation may require network access; a successful install does not
+authenticate a connected service. Open a
 new task in each running Codex instance to check the result. Re-run the command
 to pick up newly enabled plugins.
 
