@@ -154,6 +154,8 @@ python3 tools/share-codex-extensions.py \
 The tool requires Python 3.11+ and a Codex CLI with `codex plugin add`. It links
 top-level user skills with a `SKILL.md` from each home into
 `~/.agents/skills`, so edits to the original skill are visible to both profiles.
+This is Codex's user-level discovery path; `--shared-skills` accepts that path
+only. An arbitrary directory would not make skills visible to both instances.
 It leaves system and plugin-bundled skills alone. An existing shared skill with
 different contents is a conflict and stops the run before any changes. If the
 same skill already has identical local copies, the tool replaces redundant
@@ -169,11 +171,12 @@ home; a TOML setting alone is not treated as proof of installation. It calls
 the installed state again afterward. It first adds any missing configured
 custom marketplace through `codex plugin marketplace add`. A missing built-in
 marketplace makes the run stop before writing: initialize that Codex home with
-the vendor app or CLI, then rerun the tool. It does not copy plugin caches or
-edit TOML directly. Installation may require network access; a successful
-install does not authenticate a connected service. Open a new task in each
-running Codex instance to check the result. Re-run the command to pick up newly
-enabled plugins.
+the vendor app or CLI, then rerun the tool. A plugin missing from a target's
+installed and available lists likewise stops the run before writing. It does
+not copy plugin caches or edit TOML directly. Installation may require network
+access; a successful install does not authenticate a connected service. Open a
+new task in each running Codex instance to check the result. Re-run the command
+to pick up newly enabled plugins.
 
 This is extension sharing only. Account logins, sessions, MCP server definitions,
 and MCP OAuth credentials remain in their respective profile stores.

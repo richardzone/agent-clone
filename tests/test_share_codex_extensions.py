@@ -19,7 +19,11 @@ class ShareExtensionsTest(unittest.TestCase):
         self.homes = [self.root / "first", self.root / "second"]
         for home in self.homes:
             (home / "skills").mkdir(parents=True)
-        self.shared = self.root / "shared-skills"
+            (home / ".available-plugins").write_text(
+                "plugin-a@market\nplugin-b@market\nsample@market\nsample@team\n"
+                "browser@openai-bundled\n"
+            )
+        self.shared = self.root / ".agents" / "skills"
         self.cli = self.root / "codex"
         self.cli.write_text(
             r'''#!/usr/bin/env python3
@@ -29,12 +33,15 @@ config = home / 'config.toml'
 data = tomllib.loads(config.read_text()) if config.exists() else {}
 marker = home / '.installed-plugins'
 installed = set(marker.read_text().splitlines()) if marker.exists() else set()
+catalog = home / '.available-plugins'
+available = set(catalog.read_text().splitlines()) if catalog.exists() else set()
 args = sys.argv[1:]
 if args == ['plugin', 'list', '--json']:
     print(json.dumps({'installed': [
         {'pluginId': name, 'installed': True,
          'enabled': data.get('plugins', {}).get(name, {}).get('enabled') is True}
-        for name in sorted(installed)], 'available': []}))
+        for name in sorted(installed)],
+        'available': [{'pluginId': name} for name in sorted(available - installed)]}))
 elif args == ['plugin', 'marketplace', 'list', '--json']:
     print(json.dumps({'marketplaces': [
         {'name': name} for name in sorted(data.get('marketplaces', {}))]}))
@@ -61,11 +68,12 @@ else:
         self.cli.chmod(0o755)
 
     def run_tool(self, *extra, env=None):
+        run_env = {**os.environ, **(env or {}), "HOME": str(self.root)}
         return subprocess.run(
             [sys.executable, str(SCRIPT),
              "--home", str(self.homes[0]), "--home", str(self.homes[1]),
              "--shared-skills", str(self.shared), "--codex-bin", str(self.cli),
-             *extra], capture_output=True, text=True, env=env,
+             *extra], capture_output=True, text=True, env=run_env,
         )
 
     def test_plan_does_not_change_extensions_and_apply_reconciles_both_homes(self):
@@ -134,6 +142,18 @@ else:
         self.assertFalse(self.shared.exists())
         self.assertFalse((self.homes[1] / "config.toml").exists())
 
+    def test_unavailable_account_level_plugin_refuses_before_skill_links(self):
+        skill = self.homes[0] / "skills" / "source-skill"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text("safe")
+        (self.homes[0] / "config.toml").write_text(
+            '[plugins."absent@no-such-market"]\nenabled = true\n'
+        )
+        result = self.run_tool("--apply")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("is unavailable", result.stderr)
+        self.assertFalse(self.shared.exists())
+
     def test_conflicting_skill_aborts_before_changes(self):
         for home, text in zip(self.homes, ("different-a", "different-b")):
             skill = home / "skills" / "same-name"
@@ -143,6 +163,22 @@ else:
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("differs", result.stderr)
         self.assertFalse(self.shared.exists())
+
+    def test_skill_digest_framing_rejects_different_trees(self):
+        for home in self.homes:
+            skill = home / "skills" / "same-name"
+            skill.mkdir()
+            (skill / "SKILL.md").write_text("same")
+        first = self.homes[0] / "skills" / "same-name"
+        second = self.homes[1] / "skills" / "same-name"
+        (first / "a").write_bytes(b"bfile\x00420\x00")
+        (second / "a").write_bytes(b"")
+        (second / "b").write_bytes(b"")
+        result = self.run_tool("--apply")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("differs", result.stderr)
+        self.assertFalse(self.shared.exists())
+        self.assertTrue((second / "b").is_file())
 
     def test_identical_local_copies_are_replaced_with_shared_link(self):
         for home in self.homes:
@@ -214,7 +250,7 @@ else:
             [sys.executable, str(SCRIPT),
              *[item for home in (*self.homes, third) for item in ("--home", str(home))],
              "--shared-skills", str(self.shared), "--codex-bin", str(self.cli), "--apply"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, env={**os.environ, "HOME": str(self.root)},
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("cannot verify marketplace", result.stderr)
@@ -280,7 +316,7 @@ else:
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Local skill copies to unify: 0", result.stdout)
 
-    def test_shared_directory_inside_source_skill_is_rejected(self):
+    def test_non_discovery_shared_directory_is_rejected(self):
         for home in self.homes:
             skill = home / "skills" / "demo"
             skill.mkdir()
@@ -290,10 +326,10 @@ else:
             [sys.executable, str(SCRIPT),
              *[item for home in self.homes for item in ("--home", str(home))],
              "--shared-skills", str(nested), "--codex-bin", str(self.cli), "--apply"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, env={**os.environ, "HOME": str(self.root)},
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("inside source skill", result.stderr)
+        self.assertIn("user discovery directory", result.stderr)
         self.assertFalse(nested.exists())
 
 

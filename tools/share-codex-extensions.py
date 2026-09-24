@@ -24,7 +24,8 @@ def skill_digest(directory: Path) -> str:
     """Compare the complete skill, including scripts and other resources."""
     digest = hashlib.sha256()
     skill_root = directory.resolve(strict=True)
-    digest.update(str(skill_root.stat().st_mode & 0o777).encode() + b"\0")
+    digest.update(json.dumps(["root", skill_root.stat().st_mode & 0o777],
+                             separators=(",", ":")).encode() + b"\n")
 
     def walk_error(error: OSError) -> None:
         die(f"cannot read skill directory {error.filename}: {error.strerror}")
@@ -34,7 +35,6 @@ def skill_digest(directory: Path) -> str:
         for name in sorted(dirs + files):
             path = Path(root) / name
             relative = path.relative_to(directory).as_posix()
-            digest.update(relative.encode())
             if path.is_symlink():
                 try:
                     resolved = path.resolve(strict=True)
@@ -42,14 +42,17 @@ def skill_digest(directory: Path) -> str:
                     die(f"cannot resolve link in skill {path}: {error}")
                 if not resolved.is_relative_to(skill_root):
                     die(f"skill link escapes its directory: {path}")
-                digest.update(b"link\0" + os.readlink(path).encode())
+                kind, mode, payload = "link", None, os.readlink(path)
             elif path.is_file():
-                digest.update(b"file\0" + str(path.stat().st_mode & 0o777).encode()
-                              + b"\0" + path.read_bytes())
+                kind = "file"
+                mode = path.stat().st_mode & 0o777
+                payload = hashlib.sha256(path.read_bytes()).hexdigest()
             elif path.is_dir():
-                digest.update(b"dir\0" + str(path.stat().st_mode & 0o777).encode())
+                kind, mode, payload = "dir", path.stat().st_mode & 0o777, None
             else:
                 die(f"unsupported entry in skill: {path}")
+            digest.update(json.dumps([relative, kind, mode, payload],
+                                     ensure_ascii=True, separators=(",", ":")).encode() + b"\n")
     return digest.hexdigest()
 
 
@@ -112,15 +115,22 @@ def cli_json(codex: str, home: Path, command: list[str]) -> dict:
     return data
 
 
-def active_plugins(codex: str, home: Path) -> set[str]:
-    installed = cli_json(codex, home, ["list"]).get("installed")
-    if not isinstance(installed, list):
-        die(f"invalid Codex plugin list in {home}: missing installed array")
+def plugin_inventory(codex: str, home: Path) -> tuple[set[str], set[str]]:
+    data = cli_json(codex, home, ["list"])
+    installed, available = data.get("installed"), data.get("available")
+    if not isinstance(installed, list) or not isinstance(available, list):
+        die(f"invalid Codex plugin list in {home}: missing installed or available array")
     if any(not isinstance(item, dict) or not isinstance(item.get("pluginId"), str)
-           for item in installed):
-        die(f"invalid installed plugin entry in {home}")
-    return {item["pluginId"] for item in installed
-            if item.get("installed") is True and item.get("enabled") is True}
+           for item in installed + available):
+        die(f"invalid plugin entry in {home}")
+    active = {item["pluginId"] for item in installed
+              if item.get("installed") is True and item.get("enabled") is True}
+    known = {item["pluginId"] for item in installed + available}
+    return active, known
+
+
+def active_plugins(codex: str, home: Path) -> set[str]:
+    return plugin_inventory(codex, home)[0]
 
 
 def listed_marketplaces(codex: str, home: Path) -> set[str]:
@@ -175,6 +185,9 @@ def main() -> None:
     if any(not home.is_dir() for home in homes):
         die("every --home must be a directory")
     shared = args.shared_skills.expanduser().absolute()
+    discovery = (Path.home() / ".agents" / "skills").absolute()
+    if shared.resolve() != discovery.resolve():
+        die(f"shared skills path must be Codex's user discovery directory: {discovery}")
     if shared.is_symlink():
         die(f"shared skills directory must not be a symlink: {shared}")
     if shared.exists() and not shared.is_dir():
@@ -212,7 +225,9 @@ def main() -> None:
     codex = shutil.which(args.codex_bin)
     if codex is None:
         die(f"Codex CLI not found: {args.codex_bin}")
-    installed = {home: active_plugins(codex, home) for home in homes}
+    inventory = {home: plugin_inventory(codex, home) for home in homes}
+    installed = {home: inventory[home][0] for home in homes}
+    known = {home: inventory[home][1] for home in homes}
     current = {home: enabled_plugins(home) | installed[home] for home in homes}
     desired = set().union(*current.values())
     installs = [(home, plugin) for home in homes for plugin in sorted(desired - installed[home])]
@@ -258,6 +273,12 @@ def main() -> None:
             continue
         key = (home, market)
         market_additions[key] = spec
+
+    for home, plugin in installs:
+        market = plugin.rsplit("@", 1)[1]
+        if (home, market) not in market_additions and plugin not in known[home]:
+            die(f"plugin {plugin!r} is unavailable in {home}; configure its "
+                "marketplace or sign in to its account-level catalog before applying changes")
 
     print("Homes:")
     for home in homes:
