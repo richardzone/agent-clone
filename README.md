@@ -156,6 +156,10 @@ top-level user skills with a `SKILL.md` from each home into
 `~/.agents/skills`, so edits to the original skill are visible to both profiles.
 This is Codex's user-level discovery path; `--shared-skills` accepts that path
 only. An arbitrary directory would not make skills visible to both instances.
+Skills placed there are discoverable by every Codex instance for this macOS
+user, including homes omitted from `--home`. The selected homes scope plugin
+reconciliation and which personal skills the tool gathers, not who can see a
+skill after it is linked into the shared directory.
 It leaves system and plugin-bundled skills alone. An existing shared skill with
 different contents is a conflict and stops the run before any changes. If the
 same skill already has identical local copies, the tool replaces redundant
@@ -185,6 +189,10 @@ Installation may require network access; a successful install does not
 authenticate a connected service.
 Open a new task in each running Codex instance to check the result. Re-run the
 command to pick up newly enabled plugins.
+`--apply` is incremental: it creates skill links and backups before invoking
+marketplace and plugin commands. If a later command fails, earlier successful
+changes remain. Resolve the reported failure and rerun the plan, then `--apply`;
+inspect any hidden `before-sharing` backups before removing them.
 
 This is extension sharing only. Account logins, sessions, MCP server definitions,
 and MCP OAuth credentials remain in their respective profile stores.
