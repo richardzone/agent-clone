@@ -359,8 +359,10 @@ def main() -> None:
             entry = cli_markets[source_home].get(market)
             listed_identity = listed_marketplace_identity(entry) if entry else None
             if market in configured_markets[source_home]:
-                if listed_identity is not None and listed_identity != identity:
-                    die(f"Codex lists a different source for marketplace {market!r} in {source_home}")
+                if listed_identity != identity and (identity[0] == "local"
+                                                    or listed_identity is not None):
+                    die(f"Codex lists a different or unknown source for marketplace "
+                        f"{market!r} in {source_home}")
             elif plugin in current[source_home] and listed_identity != identity:
                 die(f"cannot verify marketplace {market!r} for every source of {plugin!r}")
         marketplace_add_args(market, spec)  # Validate before making any changes.

@@ -42,6 +42,10 @@ catalog = home / '.available-plugins'
 available = set(catalog.read_text().splitlines()) if catalog.exists() else set()
 implicit_marker = home / '.implicit-marketplaces.json'
 implicit = json.loads(implicit_marker.read_text()) if implicit_marker.exists() else {}
+origin_marker = home / '.marketplace-origin-overrides.json'
+origins = json.loads(origin_marker.read_text()) if origin_marker.exists() else {}
+omit_marker = home / '.omit-marketplaces'
+omit = set(omit_marker.read_text().splitlines()) if omit_marker.exists() else set()
 blocked_marker = home / '.not-installable-plugins'
 blocked = set(blocked_marker.read_text().splitlines()) if blocked_marker.exists() else set()
 def policy(name):
@@ -63,10 +67,10 @@ if args == ['plugin', 'list', '--available', '--json']:
 elif args == ['plugin', 'marketplace', 'list', '--json']:
     configured = data.get('marketplaces', {})
     print(json.dumps({'marketplaces': [
-        {'name': name, 'marketplaceSource': {
+        {'name': name, 'marketplaceSource': origins.get(name, {
             'sourceType': spec.get('source_type'),
-            'source': str(pathlib.Path(spec.get('source', '')).expanduser().resolve())}}
-        for name, spec in sorted(configured.items())] + [
+            'source': str(pathlib.Path(spec.get('source', '')).expanduser().resolve())})}
+        for name, spec in sorted(configured.items()) if name not in omit] + [
         {'name': name, 'marketplaceSource': {
             'sourceType': 'local', 'source': str(pathlib.Path(source).resolve())}}
         for name, source in sorted(implicit.items()) if name not in configured]}))
@@ -398,6 +402,38 @@ else:
         self.assertIn("already exists from another or unknown source", result.stderr)
         self.assertFalse(self.shared.exists())
         self.assertFalse((self.homes[1] / "config.toml").exists())
+
+    def test_configured_local_marketplace_requires_verified_cli_origin(self):
+        skill = self.homes[0] / "skills" / "source-skill"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text("safe")
+        market = self.root / "team"
+        manifest = market / ".agents" / "plugins" / "marketplace.json"
+        manifest.parent.mkdir(parents=True)
+        plugin_dir = market / "plugins" / "sample"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "plugin.json").write_text('{"name":"sample"}')
+        manifest.write_text('{"name":"team","plugins":[{"name":"sample",'
+                            '"source":{"source":"local","path":"./plugins/sample"},'
+                            '"policy":{"installation":"AVAILABLE"}}]}')
+        (self.homes[0] / "config.toml").write_text(
+            f'[marketplaces.team]\nsource_type = "local"\nsource = "{market}"\n'
+            '[plugins."sample@team"]\nenabled = true\n'
+        )
+        for origin in ("git", "missing"):
+            with self.subTest(origin=origin):
+                if origin == "git":
+                    (self.homes[0] / ".marketplace-origin-overrides.json").write_text(
+                        '{"team":{"sourceType":"git","source":"owner/other-market"}}'
+                    )
+                else:
+                    (self.homes[0] / ".marketplace-origin-overrides.json").unlink()
+                    (self.homes[0] / ".omit-marketplaces").write_text("team\n")
+                result = self.run_tool("--apply")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("different or unknown source", result.stderr)
+                self.assertFalse(self.shared.exists())
+                self.assertFalse((self.homes[1] / "config.toml").exists())
 
     def test_missing_local_plugin_source_refuses_before_links(self):
         skill = self.homes[0] / "skills" / "source-skill"
