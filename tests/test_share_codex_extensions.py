@@ -44,12 +44,30 @@ implicit_marker = home / '.implicit-marketplaces.json'
 implicit = json.loads(implicit_marker.read_text()) if implicit_marker.exists() else {}
 origin_marker = home / '.marketplace-origin-overrides.json'
 origins = json.loads(origin_marker.read_text()) if origin_marker.exists() else {}
+plugin_origin_marker = home / '.plugin-origin-overrides.json'
+plugin_origins = json.loads(plugin_origin_marker.read_text()) if plugin_origin_marker.exists() else {}
 omit_marker = home / '.omit-marketplaces'
 omit = set(omit_marker.read_text().splitlines()) if omit_marker.exists() else set()
 blocked_marker = home / '.not-installable-plugins'
 blocked = set(blocked_marker.read_text().splitlines()) if blocked_marker.exists() else set()
 def policy(name):
     return 'NOT_AVAILABLE' if name in blocked else 'AVAILABLE'
+def plugin_source(name):
+    return plugin_origins.get(name, {'source': 'remote', 'id': name})
+def marketplace_source(spec):
+    kind = spec.get('source_type')
+    source = spec.get('source', '')
+    if kind == 'local':
+        source = str(pathlib.Path(source).expanduser().resolve())
+    return {'sourceType': kind, 'source': source}
+def implicit_source(value):
+    if isinstance(value, dict):
+        return value
+    return {'sourceType': 'local', 'source': str(pathlib.Path(value).resolve())}
+def implicit_entry(name, value):
+    if isinstance(value, dict) and 'root' in value:
+        return {'name': name, 'root': value['root']}
+    return {'name': name, 'marketplaceSource': implicit_source(value)}
 args = sys.argv[1:]
 if args == ['plugin', 'list', '--available', '--json']:
     mutate = os.environ.get('FAKE_CODEX_MUTATE_SKILL')
@@ -59,20 +77,19 @@ if args == ['plugin', 'list', '--available', '--json']:
             pathlib.Path(mutate).write_text('changed during plugin query')
             changed.write_text('done')
     print(json.dumps({'installed': [
-        {'pluginId': name, 'installed': True, 'installPolicy': policy(name),
+        {'pluginId': name, 'source': plugin_source(name),
+         'installed': True, 'installPolicy': policy(name),
          'enabled': data.get('plugins', {}).get(name, {}).get('enabled') is True}
         for name in sorted(installed)],
-        'available': [{'pluginId': name, 'installPolicy': policy(name)}
+        'available': [{'pluginId': name, 'source': plugin_source(name),
+                       'installPolicy': policy(name)}
                       for name in sorted(available - installed)]}))
 elif args == ['plugin', 'marketplace', 'list', '--json']:
     configured = data.get('marketplaces', {})
     print(json.dumps({'marketplaces': [
-        {'name': name, 'marketplaceSource': origins.get(name, {
-            'sourceType': spec.get('source_type'),
-            'source': str(pathlib.Path(spec.get('source', '')).expanduser().resolve())})}
+        {'name': name, 'marketplaceSource': origins.get(name, marketplace_source(spec))}
         for name, spec in sorted(configured.items()) if name not in omit] + [
-        {'name': name, 'marketplaceSource': {
-            'sourceType': 'local', 'source': str(pathlib.Path(source).resolve())}}
+        implicit_entry(name, source)
         for name, source in sorted(implicit.items()) if name not in configured]}))
 elif args[:3] == ['plugin', 'marketplace', 'add']:
     source = str(pathlib.Path(args[3]).resolve())
@@ -182,7 +199,7 @@ else:
         )
         result = self.run_tool("--apply")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("is unavailable", result.stderr)
+        self.assertIn("cannot verify origin", result.stderr)
         self.assertFalse(self.shared.exists())
 
     def test_listed_but_not_installable_plugin_refuses_before_skill_links(self):
@@ -402,6 +419,72 @@ else:
         self.assertIn("already exists from another or unknown source", result.stderr)
         self.assertFalse(self.shared.exists())
         self.assertFalse((self.homes[1] / "config.toml").exists())
+
+    def test_configured_git_marketplace_rejects_cli_source_mismatch(self):
+        skill = self.homes[0] / "skills" / "source-skill"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text("safe")
+        (self.homes[0] / "config.toml").write_text(
+            '[marketplaces.team]\nsource_type = "git"\nsource = "owner/expected"\n'
+            '[plugins."sample@team"]\nenabled = true\n'
+        )
+        (self.homes[0] / ".marketplace-origin-overrides.json").write_text(
+            '{"team":{"sourceType":"git","source":"owner/other"}}'
+        )
+        result = self.run_tool("--apply")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("different or unknown source", result.stderr)
+        self.assertFalse(self.shared.exists())
+        self.assertFalse((self.homes[1] / "config.toml").exists())
+
+    def test_matching_cli_only_git_marketplace_is_reused(self):
+        (self.homes[0] / "config.toml").write_text(
+            '[marketplaces.team]\nsource_type = "git"\nsource = "owner/team"\n'
+            '[plugins."sample@team"]\nenabled = true\n'
+        )
+        (self.homes[1] / ".implicit-marketplaces.json").write_text(
+            '{"team":{"sourceType":"git","source":"owner/team"}}'
+        )
+        applied = self.run_tool("--apply")
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        self.assertIn("Marketplaces to add: 0", applied.stdout)
+        self.assertNotIn("[marketplaces.team]", (self.homes[1] / "config.toml").read_text())
+        self.assertIn("Plugin installations: 0", self.run_tool().stdout)
+
+    def test_cli_only_marketplace_mismatch_refuses_without_toml_definitions(self):
+        skill = self.homes[0] / "skills" / "source-skill"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text("safe")
+        (self.homes[0] / "config.toml").write_text(
+            '[plugins."sample@team"]\nenabled = true\n'
+        )
+        for home, source in zip(self.homes, ("first-team", "second-team")):
+            (home / ".implicit-marketplaces.json").write_text(
+                f'{{"team":"{self.root / source}"}}'
+            )
+        result = self.run_tool("--apply")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("conflicting marketplace sources", result.stderr)
+        self.assertFalse(self.shared.exists())
+        self.assertFalse((self.homes[1] / "config.toml").exists())
+
+    def test_cli_managed_cache_roots_compare_relative_plugin_paths(self):
+        (self.homes[0] / "config.toml").write_text(
+            '[plugins."sample@team"]\nenabled = true\n'
+        )
+        for home in self.homes:
+            root = home / ".tmp" / "plugins"
+            (home / ".implicit-marketplaces.json").write_text(
+                f'{{"team":{{"root":"{root}"}}}}'
+            )
+            (home / ".plugin-origin-overrides.json").write_text(
+                '{"sample@team":{"source":"local",'
+                f'"path":"{root / "plugins" / "sample"}"}}}}'
+            )
+        applied = self.run_tool("--apply")
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        self.assertIn("Marketplaces to add: 0", applied.stdout)
+        self.assertIn("Plugin installations: 0", self.run_tool().stdout)
 
     def test_configured_local_marketplace_requires_verified_cli_origin(self):
         skill = self.homes[0] / "skills" / "source-skill"

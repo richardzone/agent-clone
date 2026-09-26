@@ -122,7 +122,7 @@ def cli_json(codex: str, home: Path, command: list[str]) -> dict:
     return data
 
 
-def plugin_inventory(codex: str, home: Path) -> tuple[set[str], set[str]]:
+def plugin_inventory(codex: str, home: Path) -> tuple[set[str], set[str], dict[str, str]]:
     data = cli_json(codex, home, ["list", "--available"])
     installed, available = data.get("installed"), data.get("available")
     if not isinstance(installed, list) or not isinstance(available, list):
@@ -134,7 +134,16 @@ def plugin_inventory(codex: str, home: Path) -> tuple[set[str], set[str]]:
               if item.get("installed") is True and item.get("enabled") is True}
     installable = {item["pluginId"] for item in installed + available
                    if item.get("installPolicy") in INSTALLABLE_POLICIES}
-    return active, installable
+    origins: dict[str, str] = {}
+    for item in installed + available:
+        source = item.get("source")
+        if not isinstance(source, dict):
+            die(f"plugin {item['pluginId']!r} has no verifiable source in {home}")
+        identity = json.dumps(source, sort_keys=True, separators=(",", ":"))
+        if item["pluginId"] in origins and origins[item["pluginId"]] != identity:
+            die(f"plugin {item['pluginId']!r} has conflicting sources in {home}")
+        origins[item["pluginId"]] = identity
+    return active, installable, origins
 
 
 def active_plugins(codex: str, home: Path) -> set[str]:
@@ -182,14 +191,48 @@ def marketplace_identity(name: str, spec: dict) -> tuple:
     return ("git", source, spec.get("ref"), tuple(sorted(spec.get("sparse_paths", []))))
 
 
+def marketplace_source_identity(name: str, spec: dict) -> tuple[str, str]:
+    kind, source, *_ = marketplace_identity(name, spec)
+    return (kind, source)
+
+
 def listed_marketplace_identity(entry: dict) -> tuple | None:
     source = entry.get("marketplaceSource")
-    if not isinstance(source, dict) or source.get("sourceType") != "local":
+    if isinstance(source, dict):
+        kind, path = source.get("sourceType"), source.get("source")
+        if not isinstance(path, str) or not path:
+            return None
+        if kind == "local":
+            return ("local", str(Path(path).expanduser().resolve()))
+        if kind == "git":
+            return ("git", path)
         return None
-    path = source.get("source")
-    if not isinstance(path, str) or not path:
+    if source is not None:
         return None
-    return ("local", str(Path(path).expanduser().resolve()))
+    root = entry.get("root")
+    if isinstance(root, str) and root:
+        return ("local", str(Path(root).expanduser().resolve()))
+    return None
+
+
+def managed_cache_plugin_identity(entry: dict, home: Path, plugin_source: str | None) -> tuple | None:
+    """Compare CLI-managed catalog copies without tying identity to CODEX_HOME."""
+    if entry.get("marketplaceSource") is not None:
+        return None
+    root = entry.get("root")
+    if not isinstance(root, str) or Path(root).resolve() != (home / ".tmp" / "plugins").resolve():
+        return None
+    if plugin_source is None:
+        return None
+    try:
+        source = json.loads(plugin_source)
+        path = Path(source["path"]).resolve() if source.get("source") == "local" else None
+        relative = path.relative_to(Path(root).resolve()) if path else None
+    except (ValueError, KeyError, TypeError):
+        return None
+    if relative is None or relative == Path("."):
+        return None
+    return ("managed-cache", entry["name"], str(relative))
 
 
 def validate_local_marketplace(name: str, spec: dict, plugin: str) -> None:
@@ -324,6 +367,7 @@ def main() -> None:
     inventory = {home: plugin_inventory(codex, home) for home in homes}
     installed = {home: inventory[home][0] for home in homes}
     installable = {home: inventory[home][1] for home in homes}
+    plugin_origins = {home: inventory[home][2] for home in homes}
     current = {home: enabled_plugins(home) | installed[home] for home in homes}
     desired = set().union(*current.values())
     installs = [(home, plugin) for home in homes for plugin in sorted(desired - installed[home])]
@@ -347,20 +391,36 @@ def main() -> None:
         definitions = [(source, configured_markets[source][market]) for source in homes
                        if market in configured_markets[source]]
         if not definitions:
-            continue  # Account-level marketplace; let Codex resolve it.
+            origins = []
+            for home in homes:
+                entry = cli_markets[home].get(market)
+                cache = managed_cache_plugin_identity(entry, home, plugin_origins[home].get(plugin)) if entry else None
+                listed = listed_marketplace_identity(entry) if entry and cache is None else None
+                if cache is not None:
+                    origins.append(cache)
+                elif listed is not None:
+                    origins.append(("marketplace", listed))
+                elif entry is not None:
+                    die(f"cannot verify marketplace {market!r} in {home}")
+                elif plugin in plugin_origins[home]:
+                    origins.append(("plugin", plugin_origins[home][plugin]))
+                else:
+                    die(f"cannot verify origin of plugin {plugin!r} in {home}")
+            if len(set(origins)) != 1:
+                die(f"plugin {plugin!r} resolves to conflicting marketplace sources")
+            continue  # Account-level marketplace with matching CLI provenance.
         spec = definitions[0][1]
         for source_home, other in definitions:
             if not isinstance(other, dict):
                 die(f"invalid marketplace {market!r} in {source_home / 'config.toml'}")
             if marketplace_identity(market, other) != marketplace_identity(market, spec):
                 die(f"marketplace {market!r} has conflicting sources in {definitions[0][0]} and {source_home}")
-        identity = marketplace_identity(market, spec)
+        identity = marketplace_source_identity(market, spec)
         for source_home in homes:
             entry = cli_markets[source_home].get(market)
             listed_identity = listed_marketplace_identity(entry) if entry else None
             if market in configured_markets[source_home]:
-                if listed_identity != identity and (identity[0] == "local"
-                                                    or listed_identity is not None):
+                if listed_identity != identity:
                     die(f"Codex lists a different or unknown source for marketplace "
                         f"{market!r} in {source_home}")
             elif plugin in current[source_home] and listed_identity != identity:
@@ -381,8 +441,10 @@ def main() -> None:
             continue
         entry = cli_markets[home].get(market)
         if entry:
-            if listed_marketplace_identity(entry) != marketplace_identity(market, spec):
+            if listed_marketplace_identity(entry) != marketplace_source_identity(market, spec):
                 die(f"marketplace {market!r} already exists from another or unknown source in {home}")
+            if spec["source_type"] == "git" and (spec.get("ref") or spec.get("sparse_paths")):
+                die(f"cannot verify ref or sparse paths for existing Git marketplace {market!r} in {home}")
             continue
         key = (home, market)
         market_additions[key] = spec
