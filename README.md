@@ -136,6 +136,67 @@ Note that each clone gets its own bundle ID, and macOS grants permissions
 (notifications, microphone, screen recording, …) per bundle ID — so a clone asks for
 them again on first use, independently of the original.
 
+### Share Codex skills and plugins across profiles (optional)
+
+Codex profiles have separate `CODEX_HOME` directories. To give two or more
+profiles the same **personal skills** and **enabled plugins**, use the standalone
+tool below. It accepts arbitrary Codex homes; no clone name or maintainer path is
+built into it. The first command makes no skill links or plugin installations;
+the Codex CLI queries it runs may initialize temporary files in a Codex home:
+
+```bash
+python3 tools/share-codex-extensions.py \
+  --home "$HOME/.codex" --home "$HOME/.codex-MyCodex"
+python3 tools/share-codex-extensions.py \
+  --home "$HOME/.codex" --home "$HOME/.codex-MyCodex" --apply
+```
+
+The tool requires Python 3.11+ and a Codex CLI with `codex plugin add`. It links
+top-level user skills with a `SKILL.md` from each home into
+`~/.agents/skills`, so edits to the original skill are visible to both profiles.
+This is Codex's user-level discovery path; `--shared-skills` accepts that path
+only. An arbitrary directory would not make skills visible to both instances.
+Skills placed there are discoverable by every Codex instance for this macOS
+user, including homes omitted from `--home`. The selected homes scope plugin
+reconciliation and which personal skills the tool gathers, not who can see a
+skill after it is linked into the shared directory.
+It leaves system and plugin-bundled skills alone. An existing shared skill with
+different contents is a conflict and stops the run before any changes. If the
+same skill already has identical local copies, the tool replaces redundant
+copies with links to the shared version and keeps each original as a hidden
+`before-sharing` backup beside it. This prevents later edits from leaving a
+stale copy in one profile.
+
+For plugins, it takes the union of entries explicitly set to `enabled = true`
+in each home's `config.toml` and plugins the Codex CLI reports as installed and
+enabled. Both the plan and apply modes query
+`codex plugin list --available --json` for each home; a TOML setting alone is
+not treated as proof of installation. It calls
+`codex plugin add` under each target `CODEX_HOME` for missing plugins and checks
+the installed state again afterward. It first adds any missing configured
+custom marketplace through `codex plugin marketplace add`. A missing built-in
+marketplace makes the run stop before writing: initialize that Codex home with
+the vendor app or CLI, then rerun the tool. Where a target already has the
+marketplace, a plugin that its CLI does not list with an installable policy
+(`AVAILABLE` or `INSTALLED_BY_DEFAULT`) stops the run before writing, even if it
+appears in the `available` array. An existing CLI marketplace with the same
+name must have the same verifiable source; the tool will not replace it. Where
+the tool must add a marketplace first, it checks the source home's policy. A
+local marketplace must also have an installable entry in
+`.agents/plugins/marketplace.json` and a valid local plugin source for each
+plugin being added. The tool does not copy plugin caches or edit TOML directly.
+Installation may require network access; a successful install does not
+authenticate a connected service.
+Open a new task in each running Codex instance to check the result. Re-run the
+command to pick up newly enabled plugins.
+`--apply` is incremental: it creates skill links and backups before invoking
+marketplace and plugin commands. If a later command fails, earlier successful
+changes remain. Resolve the reported failure and rerun the plan, then `--apply`;
+inspect any hidden `before-sharing` backups before removing them.
+
+This is extension sharing only. Account logins, sessions, MCP server definitions,
+and MCP OAuth credentials remain in their respective profile stores.
+
 ---
 
 ## Notes
