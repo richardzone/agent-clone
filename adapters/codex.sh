@@ -90,6 +90,12 @@ a_preflight() {
   [[ -x "$codex_bin" ]] ||
     { print "Missing bundled codex executable (expected ${_A_CODEX_CLI_APP#Contents/}/Contents/MacOS/codex)"; return 1 }
   [[ -x "$node_bin" ]] || { print "Missing bundled Node executable"; return 1 }
+  # Seal: a_sign_extra dies unless the copied CodexCLI.app still carries an
+  # Apple-issued signature, and the copy is byte-identical to this source — so a
+  # source that fails here would fail there too, only after step 2 has already
+  # deleted the working clone. Refuse now, before any write.
+  codesign --verify --strict -R='anchor apple generic' "$codex_app" 2>/dev/null ||
+    { print "${_A_CODEX_CLI_APP#Contents/} in the source has no valid Apple-issued signature — reinstall the source app"; return 1 }
   # Identity: only Browser Use depends on these, and the identifiers and Team ID
   # below are pinned to what OpenAI ships today. If they rotate either, the clone
   # itself is still fine and the chain may well still be accepted under the new

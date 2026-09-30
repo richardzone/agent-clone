@@ -113,8 +113,8 @@ signatures on nested helpers. The correct order is: adapter-specific deep conten
 (helpers inside the framework, `Libraries`, `PlugIns`) → the frameworks themselves
 → native modules outside the asar → the real main binary → **the outer bundle
 last**, so its seal covers everything already signed. Codex's bundled
-`Resources/codex-cli/CodexCLI.app` is the deliberate exception: keep its original
-Developer ID signature (section 13).
+`Resources/codex-cli/` subtree (above all its `CodexCLI.app`) is the deliberate
+exception: keep its original Developer ID signatures (section 13).
 
 `--deep` is fine — and recommended — for **verification**
 (`codesign --verify --deep --strict`).
@@ -336,7 +336,19 @@ the `bin/codex` shell shim beside it, and verify the **bundle** rather than the
 binary, since the bundle's seal is what a copy can break. The adapter keeps the
 path in `_A_CODEX_CLI_APP` and `codex-cli-launcher.cjs` repeats it; when it moves
 again, preflight stops with `Missing bundled codex executable` and names the path it
-expected, which is what that message is for.
+expected, which is what that message is for. Only the new layout is supported, so a
+pre-26.928 source is refused by that same message rather than half-built.
+
+Two side effects of the move are easy to miss:
+
+- The app prepends `dirname(CODEX_CLI_PATH)` to the app-server's `PATH`, which is
+  how agent shells in the original find the bundled `codex`. For a clone that
+  directory is `Resources/`, which no longer holds `codex`, so the `.cjs` launcher
+  prepends the `CodexCLI.app/Contents/MacOS` directory itself.
+- Preflight hard-fails when the source's `CodexCLI.app` has no Apple-issued
+  signature at all. The post-copy assertion checks the same thing and the copy is
+  byte-identical, so without this the failure would only surface after the old
+  clone had been deleted. The pinned OpenAI identity stays a warning.
 
 Be accurate about what this does and does not preserve. The check the module
 enforces is "these three processes carry an OpenAI signing identity". After this
