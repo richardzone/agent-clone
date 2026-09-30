@@ -548,6 +548,10 @@ if (( TARGET_APP )); then
   # framework. Validate the source's slot now (layout, version, the digest formula
   # itself, and that no slot sits where step 7 cannot reach), because by step 7 the
   # old clone is already gone. Read-only; also runs under --dry-run.
+  # Check node itself first, so a missing or broken one (e.g. a version-manager
+  # shim that cannot find its $HOME) is named instead of reported as a bad digest.
+  node --version >/dev/null 2>&1 ||
+    die "node is required for app targets but '$(whence -p node || print node)' does not run"
   node "$REPO_DIR/tools/patch-asar-integrity-digest.js" --check "$SRC" ||
     die "Preflight failed: embedded ASAR integrity digest — see AGENTS.md section 3"
 fi

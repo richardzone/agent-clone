@@ -670,6 +670,18 @@ Do not convert this block into a real run.
   `grep -n 'a_cli_preflight\|dry-run: stopping here' clone-agent.sh` must print
   the preflight line first.
 
+**A sandboxed `HOME` can break `node` itself.** App targets run
+`tools/patch-asar-integrity-digest.js --check` in preflight, so even an app
+`--dry-run` needs a working `node`. A version-manager shim (asdf, nvm, …) finds
+its install through `$HOME` and exits non-zero under the sandboxed one; preflight
+then stops with "node is required for app targets". Resolve the real binary with
+your own `HOME` first and put its directory at the front of the sandbox `PATH`:
+
+```zsh
+NODE_DIR="$(node -p 'require("path").dirname(process.execPath)')"   # real HOME
+PATH="$NODE_DIR:$PATH" HOME="$SBX/home" "$SBX/clone-agent.sh" SbxName --dry-run …
+```
+
 **The source app is neither `$HOME`- nor `--dest-dir`-relative.** `SRC` falls back
 to the adapter's absolute `A_SOURCE_DEFAULT` (`/Applications/Claude.app`,
 `/Applications/ChatGPT.app`), so without `--source` a run reads and preflights the
