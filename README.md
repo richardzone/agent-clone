@@ -278,7 +278,7 @@ The substantive differences are isolated in `adapters/`:
 Codex's keychain service names — `Codex Safe Storage`, `Codex Storage Key`,
 `Codex MCP Credentials` — come from a compile-time product-name constant in
 `Codex Framework` for the first two, and are hard-coded in the Rust binary at
-`Contents/Resources/codex` for the third (`rmcp-client/src/oauth.rs`). **None are
+`Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex` for the third (`rmcp-client/src/oauth.rs`). **None are
 affected by `productName`**, so clones share these entries with the original.
 
 In practice this barely matters, because **Codex stores its login in

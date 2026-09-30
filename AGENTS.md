@@ -112,8 +112,9 @@ version** (e.g. `151.0.7922.76`, not Claude's `A`). Resolve it through the
 signatures on nested helpers. The correct order is: adapter-specific deep content
 (helpers inside the framework, `Libraries`, `PlugIns`) → the frameworks themselves
 → native modules outside the asar → the real main binary → **the outer bundle
-last**, so its seal covers everything already signed. Codex's `Resources/codex`
-is the deliberate exception: keep its original Developer ID signature (section 13).
+last**, so its seal covers everything already signed. Codex's bundled
+`Resources/codex-cli/CodexCLI.app` is the deliberate exception: keep its original
+Developer ID signature (section 13).
 
 `--deep` is fine — and recommended — for **verification**
 (`codesign --verify --deep --strict`).
@@ -321,9 +322,21 @@ socket reject the client immediately.
 
 The Codex adapter sets `CODEX_CLI_PATH` to a tiny shell launcher which immediately
 `exec`s the original signed Node binary. That Node process runs a JS launcher and
-spawns the untouched signed `Resources/codex`, producing the accepted chain
-`node_repl → codex → node`. Do not ad-hoc sign `Resources/codex`, the bundled Node,
+spawns the untouched signed `codex`, producing the accepted chain
+`node_repl → codex → node`. Do not ad-hoc sign `codex`, the bundled Node,
 or `node_repl`, and do not replace this with a bypass in the authorization module.
+
+Where that `codex` lives is an upstream detail that has already moved once. Up to
+26.917 it was a bare `Resources/codex`; from 26.928 it is the main executable of a
+nested, separately sealed bundle,
+`Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`, and `Resources/codex-cli/`
+also carries the package metadata, `bin/codex-code-mode-host`, `codex-path/rg` and
+`codex-resources/` the binary finds relative to itself. Spawn that executable, not
+the `bin/codex` shell shim beside it, and verify the **bundle** rather than the
+binary, since the bundle's seal is what a copy can break. The adapter keeps the
+path in `_A_CODEX_CLI_APP` and `codex-cli-launcher.cjs` repeats it; when it moves
+again, preflight stops with `Missing bundled codex executable` and names the path it
+expected, which is what that message is for.
 
 Be accurate about what this does and does not preserve. The check the module
 enforces is "these three processes carry an OpenAI signing identity". After this
@@ -794,8 +807,8 @@ ps eww -p "$(pgrep -xf "/Applications/$NAME.app/Contents/MacOS/$NAME.*" | head -
 #    off the clone's ad-hoc-signed main binary, and all three must be OpenAI-signed.
 #    Then actually invoke Browser Use — nothing below proves the socket accepts it.
 ps -Ao pid=,ppid=,command= | grep "/Applications/$NAME.app" |
-  grep -E 'Resources/codex|cua_node/bin/node'
-codesign -dv "/Applications/$NAME.app/Contents/Resources/codex" 2>&1 | grep TeamIdentifier
+  grep -E 'CodexCLI\.app/Contents/MacOS/codex|cua_node/bin/node'
+codesign -dv "/Applications/$NAME.app/Contents/Resources/codex-cli/CodexCLI.app" 2>&1 | grep TeamIdentifier
 # Expect: TeamIdentifier=2DC432GLL2 (NOT "not set" — that means it was ad-hoc re-signed)
 ```
 

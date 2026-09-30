@@ -10,7 +10,10 @@ const { spawn } = require('node:child_process');
 const env = { ...process.env };
 delete env.CODEX_CLI_PATH;
 
-const child = spawn(path.join(__dirname, 'codex'), process.argv.slice(2), {
+// Keep in step with _A_CODEX_CLI_APP in adapters/codex.sh.
+const codexPath = path.join(__dirname, 'codex-cli', 'CodexCLI.app', 'Contents', 'MacOS', 'codex');
+
+const child = spawn(codexPath, process.argv.slice(2), {
   env,
   stdio: 'inherit',
 });
