@@ -676,6 +676,12 @@ step "7/9 Syncing the ASAR integrity hash"
 # so it has to be synced or launching fails with FATAL: Integrity check failed.
 /usr/libexec/PlistBuddy -c "Set :ElectronAsarIntegrity:Resources/app.asar:hash ${new_hash}" "$plist"
 info "header hash = ${new_hash}"
+# Newer Electron also embeds a digest of that whole plist dictionary in its
+# framework binary (__DATA_CONST,__asar_integrity), so the plist edit above is
+# rejected with FATAL: Failed to get integrity for validatable asar archive until
+# the digest is re-synced too. Frameworks without the section are left alone;
+# step 9 re-signs every framework, so the patched binary is sealed again.
+node "$REPO_DIR/tools/patch-asar-integrity-digest.js" "$APP" || die "Embedded ASAR integrity digest update failed"
 
 # ===========================================================================
 step "8/9 Installing the wrapper (so Finder/Dock launches stay isolated too)"
