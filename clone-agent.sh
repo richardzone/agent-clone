@@ -544,6 +544,12 @@ step "Preflight: verify target assumptions"
 # an app that installs and doesn't work.
 if (( TARGET_APP )); then
   a_preflight "$SRC" || die "Preflight failed — see \"When preflight fails\" in AGENTS.md"
+  # Step 7 re-syncs the ASAR integrity digest newer Electron embeds in its
+  # framework. Validate the source's slot now (layout, version, the digest formula
+  # itself, and that no slot sits where step 7 cannot reach), because by step 7 the
+  # old clone is already gone. Read-only; also runs under --dry-run.
+  node "$REPO_DIR/tools/patch-asar-integrity-digest.js" --check "$SRC" ||
+    die "Preflight failed: embedded ASAR integrity digest — see AGENTS.md section 3"
 fi
 if (( TARGET_CLI )); then
   [[ -n "$A_CLI_COMMAND" && -n "$A_CLI_HOME_TEMPLATE" && ${#A_CLI_ENV_NAMESPACES} -gt 0 ]] ||

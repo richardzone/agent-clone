@@ -3,29 +3,39 @@
 // patch-asar-integrity-digest.js — re-sync the ASAR integrity digest that newer
 // Electron embeds in its framework binary.
 //
-//   node tools/patch-asar-integrity-digest.js <App.app>
+//   node tools/patch-asar-integrity-digest.js <App.app>           patch the clone (step 7)
+//   node tools/patch-asar-integrity-digest.js --check <App.app>   validate the source (preflight)
 //
 // Why:
 //   Info.plist's ElectronAsarIntegrity holds each archive's header hash. Newer
-//   Electron (Codex Framework 154.0.8037.57 is the first seen here) also embeds a
+//   Electron (Codex Framework 154.0.8037.57 is the first seen here) can also embed a
 //   SHA256 of that whole dictionary in the framework binary, in a Mach-O section
-//   __DATA_CONST,__asar_integrity, so an edited plist is caught too. Once the
+//   __DATA_CONST,__asar_integrity, filled in by the vendor's packager. Once the
 //   plist hash changes, that digest is stale and launch fails with
 //   FATAL: Failed to get integrity for validatable asar archive.
 //
 // Slot layout (shell/common/asar/integrity_digest.mm in electron/electron):
 //   32-byte sentinel "AGbevlPCksUGKNL8TSn7wGmJEuJsXb2A", uint8 used, uint8 version,
-//   32-byte digest. Unused slots fail open; an unknown version fails closed. The
-//   digest is SHA256 over, for each key of the dictionary in literal sort order,
-//   key + algorithm + hash (UTF-8, no separators).
+//   32-byte digest. Unused slots fail open; a used slot with an unknown version
+//   fails closed. The digest is SHA256 over, for each key of the dictionary in
+//   literal sort order, key + algorithm + hash (UTF-8, no separators).
 //
-// How:
-//   Parse each framework binary's Mach-O load commands (thin or fat) and patch only
-//   that section, in place. The section size is fixed, so nothing moves; the
-//   binary's code signature is invalidated, and step 9 re-signs every framework
-//   anyway. Binaries without the section (older Electron) are left alone.
+// --check runs in preflight against the untouched source and writes nothing. It
+//   fails before any write when the slot's layout or version is unknown, when the
+//   stored digest does not match the source's own plist under the formula above
+//   (upstream changed the hash input), or when a slot sits in a binary the patch
+//   step would not reach. Every one of those would otherwise surface only in step 7
+//   (after the old clone was deleted) or, worse, as a launch-time FATAL after a
+//   build that reported success.
 //
-// Output (stderr): one line per framework saying what was done.
+// Patch mode rewrites only the digest bytes of used slots, in place. The section
+// size is fixed, so nothing moves; the binary's code signature is invalidated, and
+// step 9 re-signs every framework anyway. Binaries without the sentinel are not
+// parsed at all, so an unrelated framework the parser does not understand cannot
+// abort a rebuild.
+//
+// Output (stderr): a summary line per framework holding a slot, or one line
+// saying there is none.
 //
 const fs = require('fs');
 const path = require('path');
@@ -33,15 +43,20 @@ const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 
 const SENTINEL = Buffer.from('AGbevlPCksUGKNL8TSn7wGmJEuJsXb2A', 'latin1');
-const SLOT_SIZE = SENTINEL.length + 2 + 32;
+const USED = SENTINEL.length;
+const VERSION = SENTINEL.length + 1;
+const DIGEST = SENTINEL.length + 2;
+const SLOT_SIZE = DIGEST + 32;
 const MH_MAGIC_64 = 0xfeedfacf;
 const FAT_MAGIC = 0xcafebabe;
 const FAT_MAGIC_64 = 0xcafebabf;
 const LC_SEGMENT_64 = 0x19;
 
-const [appPath] = process.argv.slice(2);
-if (!appPath) {
-  console.error('Usage: patch-asar-integrity-digest.js <App.app>');
+const args = process.argv.slice(2);
+const checkOnly = args[0] === '--check';
+const appPath = checkOnly ? args[1] : args[0];
+if (!appPath || args.length !== (checkOnly ? 2 : 1)) {
+  console.error('Usage: patch-asar-integrity-digest.js [--check] <App.app>');
   process.exit(1);
 }
 
@@ -50,29 +65,43 @@ function fail(msg) {
   process.exit(1);
 }
 
-// --- the digest Electron expects, computed from the plist as it now stands ---
-const plist = path.join(appPath, 'Contents', 'Info.plist');
-let integrity;
-try {
-  integrity = JSON.parse(execFileSync('/usr/bin/plutil',
-    ['-extract', 'ElectronAsarIntegrity', 'json', '-o', '-', plist],
-    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }));
-} catch {
-  fail(`${plist} has no readable ElectronAsarIntegrity dictionary`);
-}
-const hasher = crypto.createHash('sha256');
-// NSLiteralSearch compares UTF-16 code units, which is also JS's default sort.
-for (const key of Object.keys(integrity).sort()) {
-  const { algorithm, hash } = integrity[key] || {};
-  if (typeof algorithm !== 'string' || typeof hash !== 'string') {
-    fail(`ElectronAsarIntegrity:${key} lacks a string algorithm/hash`);
+function plistValue(plist, key, format) {
+  try {
+    return execFileSync('/usr/bin/plutil', ['-extract', key, format, '-o', '-', plist],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  } catch {
+    return null;
   }
-  hasher.update(key, 'utf8').update(algorithm, 'utf8').update(hash, 'utf8');
 }
-const digest = hasher.digest();
 
-// --- locate every __DATA_CONST,__asar_integrity section in a Mach-O file ---
-function sliceOffsets(buf) {
+// The digest Electron expects for this bundle's plist, as it now stands. Only
+// computed when a used slot exists: an app without one need not carry the key.
+let expectedDigest = null;
+function digestForPlist() {
+  if (expectedDigest) return expectedDigest;
+  const plist = path.join(appPath, 'Contents', 'Info.plist');
+  const json = plistValue(plist, 'ElectronAsarIntegrity', 'json');
+  let integrity;
+  try {
+    integrity = JSON.parse(json);
+  } catch {
+    fail(`${plist} has no readable ElectronAsarIntegrity dictionary, but a framework carries a used digest slot`);
+  }
+  const hasher = crypto.createHash('sha256');
+  // NSLiteralSearch compares UTF-16 code units, which is also JS's default sort.
+  for (const key of Object.keys(integrity).sort()) {
+    const { algorithm, hash } = integrity[key] || {};
+    if (typeof algorithm !== 'string' || typeof hash !== 'string') {
+      fail(`ElectronAsarIntegrity:${key} lacks a string algorithm/hash`);
+    }
+    hasher.update(key, 'utf8').update(algorithm, 'utf8').update(hash, 'utf8');
+  }
+  expectedDigest = hasher.digest();
+  return expectedDigest;
+}
+
+// --- Mach-O: every __DATA_CONST,__asar_integrity section, across fat slices ---
+function sliceOffsets(buf, label) {
   if (buf.length < 8) return [];
   const magic = buf.readUInt32BE(0);
   if (magic === FAT_MAGIC || magic === FAT_MAGIC_64) {
@@ -85,11 +114,12 @@ function sliceOffsets(buf) {
     }
     return out;
   }
-  return buf.readUInt32LE(0) === MH_MAGIC_64 ? [0] : [];
+  if (buf.readUInt32LE(0) === MH_MAGIC_64) return [0];
+  fail(`${label}: holds the integrity sentinel but is not a 64-bit Mach-O`);
 }
 
-function integritySections(buf, base) {
-  if (buf.readUInt32LE(base) !== MH_MAGIC_64) fail('unexpected Mach-O slice (not 64-bit)');
+function integritySections(buf, base, label) {
+  if (buf.readUInt32LE(base) !== MH_MAGIC_64) fail(`${label}: slice at ${base} is not 64-bit Mach-O`);
   const ncmds = buf.readUInt32LE(base + 16);
   const found = [];
   let off = base + 32;
@@ -111,41 +141,147 @@ function integritySections(buf, base) {
   return found;
 }
 
-const frameworksDir = path.join(appPath, 'Contents', 'Frameworks');
-const frameworks = fs.existsSync(frameworksDir)
-  ? fs.readdirSync(frameworksDir).filter((f) => f.endsWith('.framework'))
-  : [];
-
-for (const fw of frameworks) {
-  const bin = path.join(frameworksDir, fw, 'Versions', 'Current', fw.slice(0, -'.framework'.length));
-  if (!fs.existsSync(bin)) continue;
-  const buf = fs.readFileSync(bin);
-  const sections = sliceOffsets(buf).flatMap((base) => integritySections(buf, base));
-  if (sections.length === 0) continue;
-
-  let patched = 0;
-  let unused = 0;
-  for (const { offset, size } of sections) {
-    if (size !== SLOT_SIZE || !buf.subarray(offset, offset + SENTINEL.length).equals(SENTINEL)) {
-      fail(`${fw}: __asar_integrity section has an unknown layout (size ${size})`);
-    }
-    const used = buf[offset + SENTINEL.length];
-    const version = buf[offset + SENTINEL.length + 1];
-    if (!used) { unused++; continue; }
-    // Electron itself fails closed on any other version; so do we.
-    if (version !== 1) fail(`${fw}: __asar_integrity digest version ${version} is not supported`);
-    digest.copy(buf, offset + SENTINEL.length + 2);
-    patched++;
-  }
-  if (patched) {
-    const fd = fs.openSync(bin, 'r+');
-    try {
-      for (const { offset } of sections) {
-        if (buf[offset + SENTINEL.length]) fs.writeSync(fd, buf, offset + SENTINEL.length + 2, 32, offset + SENTINEL.length + 2);
-      }
-    } finally {
-      fs.closeSync(fd);
-    }
-  }
-  console.error(`   ${fw}: embedded integrity digest ${patched ? `re-synced in ${patched} slice(s)` : 'unused'}${unused && patched ? `, ${unused} unused` : ''}`);
+function sentinelOffsets(buf) {
+  const out = [];
+  for (let i = buf.indexOf(SENTINEL); i >= 0; i = buf.indexOf(SENTINEL, i + 1)) out.push(i);
+  return out;
 }
+
+// Validate every slot in one binary; return them, or [] if it holds none.
+function slotsIn(bin, label) {
+  const buf = fs.readFileSync(bin);
+  const hits = sentinelOffsets(buf);
+  if (hits.length === 0) return { buf, slots: [] };
+  let slots;
+  try {
+    slots = sliceOffsets(buf, label).flatMap((base) => integritySections(buf, base, label));
+  } catch (e) {
+    fail(`${label}: could not parse Mach-O load commands (${e.message})`);
+  }
+  for (const { offset, size } of slots) {
+    if (size !== SLOT_SIZE || !buf.subarray(offset, offset + SENTINEL.length).equals(SENTINEL)) {
+      fail(`${label}: __asar_integrity section has an unknown layout (size ${size})`);
+    }
+    // Electron itself fails closed on any other version of a used slot; so do we.
+    if (buf[offset + USED] && buf[offset + VERSION] !== 1) {
+      fail(`${label}: __asar_integrity digest version ${buf[offset + VERSION]} is not supported`);
+    }
+  }
+  const inSection = new Set(slots.map((s) => s.offset));
+  const stray = hits.filter((h) => !inSection.has(h));
+  if (stray.length) fail(`${label}: integrity sentinel found outside an __asar_integrity section`);
+  return { buf, slots };
+}
+
+// --- the binaries the patch step reaches: each framework's own executable ---
+const appReal = fs.realpathSync(appPath);
+const frameworksDir = path.join(appPath, 'Contents', 'Frameworks');
+const targets = [];
+if (fs.existsSync(frameworksDir)) {
+  for (const fw of fs.readdirSync(frameworksDir).filter((f) => f.endsWith('.framework'))) {
+    const current = path.join(frameworksDir, fw, 'Versions', 'Current');
+    const exe = (plistValue(path.join(current, 'Resources', 'Info.plist'), 'CFBundleExecutable', 'raw') || '').trim()
+      || fw.slice(0, -'.framework'.length);
+    const bin = path.join(current, exe);
+    if (!fs.existsSync(bin)) continue;
+    const real = fs.realpathSync(bin);
+    // cp -R keeps symlinks: never write through one that leaves the bundle.
+    if (!real.startsWith(appReal + path.sep)) fail(`${fw}: executable resolves outside the bundle (${real})`);
+    targets.push({ fw, bin: real });
+  }
+}
+
+let anySlot = false;
+for (const { fw, bin } of targets) {
+  const { buf, slots } = slotsIn(bin, fw);
+  if (slots.length === 0) continue;
+  anySlot = true;
+  const used = slots.filter((s) => buf[s.offset + USED]);
+  const unusedNote = used.length < slots.length ? `, ${slots.length - used.length} unused` : '';
+  if (used.length === 0) {
+    console.error(`   ${fw}: embedded integrity digest unused`);
+    continue;
+  }
+  const digest = digestForPlist();
+  if (checkOnly) {
+    // On the untouched source the stored digest must equal the formula's result.
+    // If it does not, upstream changed the hash input and a patched clone would
+    // FATAL at launch — refuse now, before anything is deleted.
+    for (const { offset } of used) {
+      if (!buf.subarray(offset + DIGEST, offset + SLOT_SIZE).equals(digest)) {
+        fail(`${fw}: stored integrity digest does not match this plist — upstream changed the digest formula, or the bundle was modified (reinstall it)`);
+      }
+    }
+    console.error(`   Embedded ASAR integrity digest ✓ (${fw}, ${used.length} slice(s)${unusedNote})`);
+    continue;
+  }
+  const fd = fs.openSync(bin, 'r+');
+  try {
+    for (const { offset } of used) fs.writeSync(fd, digest, 0, 32, offset + DIGEST);
+  } finally {
+    fs.closeSync(fd);
+  }
+  console.error(`   ${fw}: embedded integrity digest re-synced in ${used.length} slice(s)${unusedNote}`);
+}
+
+// --check also proves no slot sits somewhere the patch step does not reach: in the
+// main executable, a helper, a dylib, or a framework whose executable resolves
+// differently. Any such slot would go stale silently and FATAL at launch.
+// Electron places the slot with __attribute__((section(...))), so it is always in
+// an __asar_integrity section: reading each Mach-O's load commands (a few KB) finds
+// it without reading whole binaries, which would cost ~30 s on a 1.6 GB bundle.
+function readAt(fd, pos, len) {
+  const b = Buffer.alloc(len);
+  return b.subarray(0, fs.readSync(fd, b, 0, len, pos));
+}
+function hasIntegritySection(file) {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const head = readAt(fd, 0, 8);
+    if (head.length < 8) return false;
+    const be = head.readUInt32BE(0);
+    let bases;
+    if (be === FAT_MAGIC || be === FAT_MAGIC_64) {
+      const n = head.readUInt32BE(4);
+      const entry = be === FAT_MAGIC ? 20 : 32;
+      if (n > 64) return false;                       // Java class files share 0xcafebabe
+      const table = readAt(fd, 8, n * entry);
+      if (table.length < n * entry) return false;
+      bases = [...Array(n).keys()].map((i) => (be === FAT_MAGIC
+        ? table.readUInt32BE(i * entry + 8) : Number(table.readBigUInt64BE(i * entry + 8))));
+    } else if (head.readUInt32LE(0) === MH_MAGIC_64) {
+      bases = [0];
+    } else {
+      return false;                                   // not a 64-bit Mach-O
+    }
+    for (const base of bases) {
+      const mh = readAt(fd, base, 32);
+      if (mh.length < 32 || mh.readUInt32LE(0) !== MH_MAGIC_64) continue;
+      // Real load-command areas are a few KB; cap it so a corrupt header cannot
+      // ask for gigabytes.
+      const cmds = readAt(fd, base + 32, Math.min(mh.readUInt32LE(20), 1 << 24));
+      if (cmds.indexOf('__asar_integrity', 0, 'latin1') >= 0) return true;
+    }
+    return false;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+if (checkOnly) {
+  const reached = new Set(targets.map((t) => t.bin));
+  const walk = (dir) => {
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, ent.name);
+      if (ent.isDirectory()) { walk(p); continue; }
+      // Symlinks are skipped (their targets are walked directly); compare real paths
+      // because the targets were resolved through Versions/Current.
+      if (!ent.isFile() || reached.has(fs.realpathSync(p))) continue;
+      if (hasIntegritySection(p)) {
+        fail(`${path.relative(appPath, p)} carries an integrity slot the patch step would not update`);
+      }
+    }
+  };
+  walk(path.join(appPath, 'Contents'));
+}
+
+if (!anySlot) console.error('   Embedded ASAR integrity digest: none (older Electron)');

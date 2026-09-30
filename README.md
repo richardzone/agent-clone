@@ -308,8 +308,11 @@ adapters/README.md                  adapter interface contract
 adapters/claude.sh                  Claude support
 adapters/codex.sh                   Codex support
 tools/patch-asar-productname.js     in-place productName rewrite inside app.asar
-tools/patch-asar-integrity-digest.js  re-syncs the ASAR integrity digest embedded in the
-                                      Electron framework binary (newer Electron)
+tools/patch-asar-integrity-digest.js
+                                    checks (preflight) and re-syncs (step 7) the ASAR
+                                    integrity digest newer Electron embeds in its framework
+tools/test-patch-asar-integrity-digest.js
+                                    synthetic Mach-O regression checks for the above
 tools/write-config-library.js       Claude's local-tier policy file (disables auto-update)
 tools/make-icon.sh                  png -> icns (crop, center, round, all sizes)
 tools/codex-cli-launcher            copied into a Codex clone; keeps an OpenAI-signed

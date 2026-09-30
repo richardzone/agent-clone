@@ -89,20 +89,34 @@ After modifying the header, write the new hash back (engine step 7).
 `FATAL:…/asar/archive.cc: Failed to get integrity for validatable asar archive: Resources/app.asar`,
 with the plist hash correct.
 
-Newer Electron also embeds a digest **of that plist dictionary** in the framework
-binary, in the Mach-O section `__DATA_CONST,__asar_integrity`
-(`shell/common/asar/integrity_digest.mm` upstream). The slot is a 32-byte sentinel,
-a `used` byte, a `version` byte and a SHA256 over each key in literal sort order
-concatenated with its `algorithm` and `hash`. Codex Framework 154.0.8037.57
-(ChatGPT 26.928) is the first build seen here with the slot in use, so a correct
-plist hash alone is rejected. `tools/patch-asar-integrity-digest.js` recomputes the
-digest from the plist and patches that section in place. It runs right after the
-plist write in step 7, and step 9 re-signs the framework it changed.
+Newer Electron reserves a slot in its framework binary, in the Mach-O section
+`__DATA_CONST,__asar_integrity` (`shell/common/asar/integrity_digest.mm`
+upstream), for a digest **of that plist dictionary**; the vendor's packager fills
+it in. The slot is a 32-byte sentinel, a `used` byte, a `version` byte and a
+SHA256 over each key in literal sort order concatenated with its `algorithm` and
+`hash`. Codex Framework 154.0.8037.57 (ChatGPT 26.928) is the first build seen
+here with the slot in use, so a correct plist hash alone is rejected.
+
+`tools/patch-asar-integrity-digest.js` handles it in two places:
+
+- **Preflight, `--check "$SRC"`** (read-only, runs under `--dry-run` too). Before
+  anything is deleted it refuses a source whose slot has an unknown layout, whose
+  used slot has an unknown `version`, whose stored digest the formula above does
+  not reproduce from the source's own plist (upstream changed the hash input), or
+  that carries an `__asar_integrity` section anywhere step 7 would not reach.
+  Without this, each of those surfaced only in step 7, after the old clone was
+  gone, or as a launch FATAL after a build that reported success.
+- **Step 7, right after the plist write**, it recomputes the digest and rewrites
+  the used slots in place. It only parses binaries that contain the sentinel, finds
+  each framework's executable through its `CFBundleExecutable`, and refuses one
+  that resolves outside the bundle. Step 9 re-signs the framework it changed.
 
 Claude's Electron Framework carries the same slot, still unused (`used = 0`, which
 Electron treats as "no digest, fail open"), so the tool leaves it alone. When a
-Claude release starts setting it, the same step covers it. An unknown `version`
-fails the build, because Electron fails closed on it too.
+Claude release starts setting it, the same steps cover it. An unknown `version` on
+a used slot fails the build, because Electron fails closed on it too.
+`tools/test-patch-asar-integrity-digest.js` exercises all of this on synthetic
+thin and fat Mach-O bundles.
 
 ## 4. Claude's helpers must be renamed; Codex's must not
 
