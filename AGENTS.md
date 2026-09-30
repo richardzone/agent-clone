@@ -341,14 +341,21 @@ pre-26.928 source is refused by that same message rather than half-built.
 
 Two side effects of the move are easy to miss:
 
-- The app prepends `dirname(CODEX_CLI_PATH)` to the app-server's `PATH`, which is
-  how agent shells in the original find the bundled `codex`. For a clone that
-  directory is `Resources/`, which no longer holds `codex`, so the `.cjs` launcher
-  prepends the `CodexCLI.app/Contents/MacOS` directory itself.
-- Preflight hard-fails when the source's `CodexCLI.app` has no Apple-issued
-  signature at all. The post-copy assertion checks the same thing and the copy is
-  byte-identical, so without this the failure would only surface after the old
-  clone had been deleted. The pinned OpenAI identity stays a warning.
+- The app **appends** `dirname(CODEX_CLI_PATH)` to the app-server's `PATH` (only
+  if absent), which gives agent shells in the original a fallback `codex` behind any
+  the user installed. For a clone that directory is `Resources/`, which no longer
+  holds `codex`, so the `.cjs` launcher appends the `CodexCLI.app/Contents/MacOS`
+  directory the same way. Do not turn that into a prepend: it would shadow the
+  user's own `codex` in the clone but not in the original.
+- Preflight hard-fails unless the source's `CodexCLI.app` passes
+  `codesign --verify --strict -R='anchor apple generic'` — a valid seal under any
+  Apple-issued certificate, so an ad-hoc, unsigned or modified bundle is refused.
+  The post-copy assertion checks the same thing and the copy is byte-identical, so
+  without this the failure would only surface after the old clone had been
+  deleted. The pinned OpenAI identity stays a warning. That post-copy assertion
+  runs inside `a_sign_extra`, before the engine's own signing loops, so it guards
+  only what precedes it; none of those loops reaches `Resources/codex-cli/` today,
+  and a new one must not.
 
 Be accurate about what this does and does not preserve. The check the module
 enforces is "these three processes carry an OpenAI signing identity". After this

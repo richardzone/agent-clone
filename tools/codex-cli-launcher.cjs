@@ -13,11 +13,16 @@ delete env.CODEX_CLI_PATH;
 // Keep in step with _A_CODEX_CLI_APP in adapters/codex.sh.
 const codexPath = path.join(__dirname, 'codex-cli', 'CodexCLI.app', 'Contents', 'MacOS', 'codex');
 
-// The app prepends dirname(CODEX_CLI_PATH) to the app-server's PATH so agent
-// shells can run the bundled `codex`. For a clone that directory is Resources/,
-// which no longer holds codex (it moved into CodexCLI.app in 26.928), so put the
-// real binary's directory first, as the original app does.
-env.PATH = env.PATH ? `${path.dirname(codexPath)}${path.delimiter}${env.PATH}` : path.dirname(codexPath);
+// The app appends dirname(CODEX_CLI_PATH) to the app-server's PATH, if absent, as
+// a fallback `codex` for agent shells; a user's own codex earlier on PATH still
+// wins. For a clone that directory is Resources/, which no longer holds codex
+// (it moved into CodexCLI.app in 26.928), so append the real binary's directory
+// the same way. Appending, not prepending, keeps the original's precedence.
+const codexDir = path.dirname(codexPath);
+const currentPath = env.PATH || '';
+if (!currentPath.split(path.delimiter).includes(codexDir)) {
+  env.PATH = currentPath ? `${currentPath}${path.delimiter}${codexDir}` : codexDir;
+}
 
 const child = spawn(codexPath, process.argv.slice(2), {
   env,
