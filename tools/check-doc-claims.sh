@@ -34,7 +34,9 @@ anchors=(
   "$ENGINE§cp -R \"\$SRC\" \"\$APP\"§the source copy"
   "$ENGINE§: \${TARGET:=all}§omitting --target selects the widest target"
   "$ENGINE§: \${DEST_DIR:=\"/Applications\"}§omitting --dest-dir aims at /Applications"
-  "$ENGINE§patch-asar-integrity-digest.js\" --check \"\$SRC\"§preflight checks the embedded integrity slot"
+  "$ENGINE§patch-asar-integrity-digest.js\" --check \"\$SRC\" ||§preflight checks the embedded integrity slot, and refuses"
+  "$ENGINE§die \"Preflight failed: embedded ASAR integrity digest§a failed digest check stops the run"
+  "$ENGINE§node is required for app targets§preflight names a broken node"
   "$ENGINE§patch-asar-integrity-digest.js\" \"\$APP\"§step 7 re-syncs the embedded integrity digest"
   "adapters/codex.sh§CODEX_HOME=\"\$tmp\" codex§codex preflight runs the vendor binary"
   "adapters/claude.sh§a_cli_preflight() { :; }§claude's preflight is a no-op"
@@ -73,6 +75,7 @@ doc_must+=(
   '`--dest-dir` to `/Applications`§the dest-dir default claim'
   '**Preflight, `--check "$SRC"`**§the embedded-digest preflight claim'
   '**Step 7, right after the plist write**§the embedded-digest step-7 claim'
+  'node is required for app targets§the broken-node message quote'
 )
 for d in $doc_must; do
   frag="${d%%§*}"; what="${d#*§}"
@@ -110,9 +113,10 @@ pre=$(grep -n 'a_cli_preflight .. die' "$ENGINE" | cut -d: -f1)
 bnd=$(grep -nF 'dry-run: stopping here' "$ENGINE" | cut -d: -f1)
 cpy=$(grep -nF 'cp -R "$SRC" "$APP"' "$ENGINE" | cut -d: -f1)
 lsr=$(grep -nF 'lsregister' "$ENGINE" | head -1 | cut -d: -f1)
-dck=$(grep -nF 'patch-asar-integrity-digest.js" --check' "$ENGINE" | cut -d: -f1)
-dpt=$(grep -nF 'patch-asar-integrity-digest.js" "$APP"' "$ENGINE" | cut -d: -f1)
-if [[ -z "$pre" || -z "$bnd" || -z "$cpy" || -z "$lsr" || -z "$dck" || -z "$dpt" ]]; then
+dck=$(grep -nF 'patch-asar-integrity-digest.js" --check' "$ENGINE" | head -1 | cut -d: -f1)
+dpt=$(grep -nF 'patch-asar-integrity-digest.js" "$APP"' "$ENGINE" | head -1 | cut -d: -f1)
+ndv=$(grep -nF 'node --version' "$ENGINE" | head -1 | cut -d: -f1)
+if [[ -z "$pre" || -z "$bnd" || -z "$cpy" || -z "$lsr" || -z "$dck" || -z "$dpt" || -z "$ndv" ]]; then
   note "could not locate one of the ordering anchors"
 else
   (( pre < bnd )) && ok "codex preflight runs above the boundary" \
@@ -121,6 +125,8 @@ else
                   || note "digest --check ($dck) is no longer above the boundary ($bnd)"
   (( dpt > cpy )) && ok "the embedded-digest patch runs on the copy, not the source" \
                   || note "digest patch ($dpt) no longer comes after the copy ($cpy)"
+  (( ndv < dck )) && ok "node is checked before preflight first uses it" \
+                  || note "node --version ($ndv) no longer precedes the digest --check ($dck)"
   (( cpy > bnd )) && ok "the source copy is past the boundary" \
                   || note "cp -R ($cpy) is no longer past the boundary ($bnd)"
   (( lsr > bnd )) && ok "lsregister / killall Dock are past the boundary" \

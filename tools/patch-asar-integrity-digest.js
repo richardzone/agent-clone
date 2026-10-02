@@ -81,10 +81,11 @@ function digestForPlist() {
   if (expectedDigest) return expectedDigest;
   const plist = path.join(appPath, 'Contents', 'Info.plist');
   const json = plistValue(plist, 'ElectronAsarIntegrity', 'json');
-  let integrity;
+  let integrity = null;
   try {
-    integrity = JSON.parse(json);
-  } catch {
+    integrity = JSON.parse(json);  // JSON.parse(null) returns null rather than throwing
+  } catch { /* handled below */ }
+  if (!integrity || typeof integrity !== 'object' || Array.isArray(integrity)) {
     fail(`${plist} has no readable ElectronAsarIntegrity dictionary, but a framework carries a used digest slot`);
   }
   const hasher = crypto.createHash('sha256');
@@ -149,7 +150,12 @@ function sentinelOffsets(buf) {
 
 // Validate every slot in one binary; return them, or [] if it holds none.
 function slotsIn(bin, label) {
-  const buf = fs.readFileSync(bin);
+  let buf;
+  try {
+    buf = fs.readFileSync(bin);
+  } catch (e) {
+    fail(`${label}: cannot read ${bin} (${e.code || e.message})`);
+  }
   const hits = sentinelOffsets(buf);
   if (hits.length === 0) return { buf, slots: [] };
   let slots;
@@ -191,6 +197,8 @@ if (fs.existsSync(frameworksDir)) {
   }
 }
 
+// Printed only once everything has passed, so a later refusal never follows a ✓.
+const summary = [];
 let anySlot = false;
 for (const { fw, bin } of targets) {
   const { buf, slots } = slotsIn(bin, fw);
@@ -199,7 +207,7 @@ for (const { fw, bin } of targets) {
   const used = slots.filter((s) => buf[s.offset + USED]);
   const unusedNote = used.length < slots.length ? `, ${slots.length - used.length} unused` : '';
   if (used.length === 0) {
-    console.error(`   ${fw}: embedded integrity digest unused`);
+    summary.push(`   ${fw}: embedded integrity digest unused`);
     continue;
   }
   const digest = digestForPlist();
@@ -212,7 +220,7 @@ for (const { fw, bin } of targets) {
         fail(`${fw}: stored integrity digest does not match this plist — upstream changed the digest formula, or the bundle was modified (reinstall it)`);
       }
     }
-    console.error(`   Embedded ASAR integrity digest ✓ (${fw}, ${used.length} slice(s)${unusedNote})`);
+    summary.push(`   Embedded ASAR integrity digest ✓ (${fw}, ${used.length} slice(s)${unusedNote})`);
     continue;
   }
   const fd = fs.openSync(bin, 'r+');
@@ -221,7 +229,7 @@ for (const { fw, bin } of targets) {
   } finally {
     fs.closeSync(fd);
   }
-  console.error(`   ${fw}: embedded integrity digest re-synced in ${used.length} slice(s)${unusedNote}`);
+  summary.push(`   ${fw}: embedded integrity digest re-synced in ${used.length} slice(s)${unusedNote}`);
 }
 
 // --check also proves no slot sits somewhere the patch step does not reach: in the
@@ -244,11 +252,15 @@ function hasIntegritySection(file) {
     if (be === FAT_MAGIC || be === FAT_MAGIC_64) {
       const n = head.readUInt32BE(4);
       const entry = be === FAT_MAGIC ? 20 : 32;
-      if (n > 64) return false;                       // Java class files share 0xcafebabe
+      // Loose sanity bound only: Java class files also start 0xcafebabe, and the
+      // per-slice magic check below is what actually rejects them.
+      if (n > 64) return false;
       const table = readAt(fd, 8, n * entry);
       if (table.length < n * entry) return false;
+      const fileSize = fs.fstatSync(fd).size;
       bases = [...Array(n).keys()].map((i) => (be === FAT_MAGIC
-        ? table.readUInt32BE(i * entry + 8) : Number(table.readBigUInt64BE(i * entry + 8))));
+        ? table.readUInt32BE(i * entry + 8) : Number(table.readBigUInt64BE(i * entry + 8))))
+        .filter((b) => Number.isSafeInteger(b) && b + 32 <= fileSize);   // junk headers
     } else if (head.readUInt32LE(0) === MH_MAGIC_64) {
       bases = [0];
     } else {
@@ -269,19 +281,29 @@ function hasIntegritySection(file) {
 }
 if (checkOnly) {
   const reached = new Set(targets.map((t) => t.bin));
+  // An unreadable file or directory is refused by name: the build's `cp -R` could
+  // not copy it either, so this only moves that failure earlier.
+  const guarded = (p, what, fn) => {
+    try {
+      return fn();
+    } catch (e) {
+      return fail(`cannot ${what} ${path.relative(appPath, p) || p} (${e.code || e.message})`);
+    }
+  };
   const walk = (dir) => {
-    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+    for (const ent of guarded(dir, 'list', () => fs.readdirSync(dir, { withFileTypes: true }))) {
       const p = path.join(dir, ent.name);
       if (ent.isDirectory()) { walk(p); continue; }
       // Symlinks are skipped (their targets are walked directly); compare real paths
       // because the targets were resolved through Versions/Current.
       if (!ent.isFile() || reached.has(fs.realpathSync(p))) continue;
-      if (hasIntegritySection(p)) {
-        fail(`${path.relative(appPath, p)} carries an integrity slot the patch step would not update`);
+      if (guarded(p, 'read', () => hasIntegritySection(p))) {
+        fail(`${path.relative(appPath, p)} has an __asar_integrity section the patch step does not reach`);
       }
     }
   };
   walk(path.join(appPath, 'Contents'));
 }
 
+for (const line of summary) console.error(line);
 if (!anySlot) console.error('   Embedded ASAR integrity digest: none (older Electron)');

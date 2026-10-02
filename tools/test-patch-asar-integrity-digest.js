@@ -222,7 +222,9 @@ try {
   // 11. used slot but no ElectronAsarIntegrity in the plist
   {
     const app = makeApp('noplist', { frameworks: { 'E.framework': { binary: slice() } }, integrity: null });
-    check('used slot without a plist dictionary fails', run(app).code !== 0);
+    const r = run(app);
+    check('used slot without a plist dictionary fails with its own message',
+      r.code !== 0 && /no readable ElectronAsarIntegrity/.test(r.err) && !/TypeError/.test(r.err), r.err);
   }
   // 12. multiple keys: literal sort order, key+algorithm+hash
   {
@@ -250,7 +252,7 @@ try {
       extra: { 'Contents/MacOS/Main': slice({ digest: EXPECTED }) },
     });
     const r = run('--check', app);
-    check('--check finds a slot outside the frameworks', r.code !== 0 && /would not update/.test(r.err), r.err);
+    check('--check finds a slot outside the frameworks', r.code !== 0 && /does not reach/.test(r.err), r.err);
   }
   // 15. --check: consistent source passes
   {
@@ -271,6 +273,34 @@ try {
     const r = run(app);
     check('executable outside the bundle is refused', r.code !== 0 && /outside the bundle/.test(r.err), r.err);
     check('…and the outside file is untouched', fs.readFileSync(outside).equals(before));
+  }
+  // 18. --check: an unreadable file is refused by name, with no ✓ printed first
+  {
+    const app = makeApp('unreadable', {
+      frameworks: { 'E.framework': { binary: slice({ digest: EXPECTED }) } },
+      extra: { 'Contents/Resources/secret.bin': Buffer.from('x') },
+    });
+    fs.chmodSync(path.join(app, 'Contents/Resources/secret.bin'), 0o000);
+    const r = run('--check', app);
+    fs.chmodSync(path.join(app, 'Contents/Resources/secret.bin'), 0o644);
+    check('unreadable file is refused by name, not with a stack trace',
+      r.code !== 0 && /cannot read Contents\/Resources\/secret\.bin/.test(r.err) && !/✓/.test(r.err) && !/at /.test(r.err), r.err);
+  }
+  // 19. --check: junk headers that look fat (offset past EOF, Java class file) are not slots
+  {
+    const junk64 = Buffer.alloc(64);
+    junk64.writeUInt32BE(0xcafebabf, 0);
+    junk64.writeUInt32BE(1, 4);
+    junk64.writeBigUInt64BE(0xfffffffffffff000n, 16);   // slice offset far past EOF
+    const javaClass = Buffer.alloc(64);
+    javaClass.writeUInt32BE(0xcafebabe, 0);
+    javaClass.writeUInt32BE(52, 4);                      // minor/major of a Java 8 class
+    const app = makeApp('junkfat', {
+      frameworks: { 'E.framework': { binary: slice({ digest: EXPECTED }) } },
+      extra: { 'Contents/Resources/junk64': junk64, 'Contents/Resources/A.class': javaClass },
+    });
+    const r = run('--check', app);
+    check('junk fat headers are ignored by the bundle scan', r.code === 0 && /✓/.test(r.err), r.err);
   }
   // 17. no slot anywhere: succeed and say so
   {
