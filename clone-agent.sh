@@ -544,6 +544,16 @@ step "Preflight: verify target assumptions"
 # an app that installs and doesn't work.
 if (( TARGET_APP )); then
   a_preflight "$SRC" || die "Preflight failed — see \"When preflight fails\" in AGENTS.md"
+  # Step 7 re-syncs the ASAR integrity digest newer Electron embeds in its
+  # framework. Validate the source's slot now (layout, version, the digest formula
+  # itself, and that no slot sits where step 7 cannot reach), because by step 7 the
+  # old clone is already gone. Read-only; also runs under --dry-run.
+  # Check node itself first, so a missing or broken one (e.g. a version-manager
+  # shim that cannot find its $HOME) is named instead of reported as a bad digest.
+  node --version >/dev/null 2>&1 ||
+    die "node is required for app targets but '$(whence -p node || print node)' does not run"
+  node "$REPO_DIR/tools/patch-asar-integrity-digest.js" --check "$SRC" ||
+    die "Preflight failed: embedded ASAR integrity digest — see AGENTS.md section 3"
 fi
 if (( TARGET_CLI )); then
   [[ -n "$A_CLI_COMMAND" && -n "$A_CLI_HOME_TEMPLATE" && ${#A_CLI_ENV_NAMESPACES} -gt 0 ]] ||
@@ -676,6 +686,12 @@ step "7/9 Syncing the ASAR integrity hash"
 # so it has to be synced or launching fails with FATAL: Integrity check failed.
 /usr/libexec/PlistBuddy -c "Set :ElectronAsarIntegrity:Resources/app.asar:hash ${new_hash}" "$plist"
 info "header hash = ${new_hash}"
+# Newer Electron also embeds a digest of that whole plist dictionary in its
+# framework binary (__DATA_CONST,__asar_integrity), so the plist edit above is
+# rejected with FATAL: Failed to get integrity for validatable asar archive until
+# the digest is re-synced too. Frameworks without the section are left alone;
+# step 9 re-signs every framework, so the patched binary is sealed again.
+node "$REPO_DIR/tools/patch-asar-integrity-digest.js" "$APP" || die "Embedded ASAR integrity digest update failed"
 
 # ===========================================================================
 step "8/9 Installing the wrapper (so Finder/Dock launches stay isolated too)"

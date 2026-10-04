@@ -85,6 +85,39 @@ writing a corrupt asar.
 `ElectronAsarIntegrity` in `Info.plist` holds the **SHA256 of the asar header**.
 After modifying the header, write the new hash back (engine step 7).
 
+**Second symptom, newer Electron:**
+`FATAL:…/asar/archive.cc: Failed to get integrity for validatable asar archive: Resources/app.asar`,
+with the plist hash correct.
+
+Newer Electron reserves a slot in its framework binary, in the Mach-O section
+`__DATA_CONST,__asar_integrity` (`shell/common/asar/integrity_digest.mm`
+upstream), for a digest **of that plist dictionary**; the vendor's packager fills
+it in. The slot is a 32-byte sentinel, a `used` byte, a `version` byte and a
+SHA256 over each key in literal sort order concatenated with its `algorithm` and
+`hash`. Codex Framework 154.0.8037.57 (ChatGPT 26.928) is the first build seen
+here with the slot in use, so a correct plist hash alone is rejected.
+
+`tools/patch-asar-integrity-digest.js` handles it in two places:
+
+- **Preflight, `--check "$SRC"`** (read-only, runs under `--dry-run` too). Before
+  anything is deleted it refuses a source whose slot has an unknown layout, whose
+  used slot has an unknown `version`, whose stored digest the formula above does
+  not reproduce from the source's own plist (upstream changed the hash input), or
+  that carries an `__asar_integrity` section anywhere step 7 would not reach.
+  Without this, each of those surfaced only in step 7, after the old clone was
+  gone, or as a launch FATAL after a build that reported success.
+- **Step 7, right after the plist write**, it recomputes the digest and rewrites
+  the used slots in place. It only parses binaries that contain the sentinel, finds
+  each framework's executable through its `CFBundleExecutable`, and refuses one
+  that resolves outside the bundle. Step 9 re-signs the framework it changed.
+
+Claude's Electron Framework carries the same slot, still unused (`used = 0`, which
+Electron treats as "no digest, fail open"), so the tool leaves it alone. When a
+Claude release starts setting it, the same steps cover it. An unknown `version` on
+a used slot fails the build, because Electron fails closed on it too.
+`tools/test-patch-asar-integrity-digest.js` exercises all of this on synthetic
+thin and fat Mach-O bundles.
+
 ## 4. Claude's helpers must be renamed; Codex's must not
 
 **Symptom:** `FATAL:electron_main_delegate_mac.mm: Unable to find helper app`
@@ -112,8 +145,9 @@ version** (e.g. `151.0.7922.76`, not Claude's `A`). Resolve it through the
 signatures on nested helpers. The correct order is: adapter-specific deep content
 (helpers inside the framework, `Libraries`, `PlugIns`) → the frameworks themselves
 → native modules outside the asar → the real main binary → **the outer bundle
-last**, so its seal covers everything already signed. Codex's `Resources/codex`
-is the deliberate exception: keep its original Developer ID signature (section 13).
+last**, so its seal covers everything already signed. Codex's bundled
+`Resources/codex-cli/` subtree (above all its `CodexCLI.app`) is the deliberate
+exception: keep its original Developer ID signatures (section 13).
 
 `--deep` is fine — and recommended — for **verification**
 (`codesign --verify --deep --strict`).
@@ -321,9 +355,43 @@ socket reject the client immediately.
 
 The Codex adapter sets `CODEX_CLI_PATH` to a tiny shell launcher which immediately
 `exec`s the original signed Node binary. That Node process runs a JS launcher and
-spawns the untouched signed `Resources/codex`, producing the accepted chain
-`node_repl → codex → node`. Do not ad-hoc sign `Resources/codex`, the bundled Node,
+spawns the untouched signed `codex`, producing the accepted chain
+`node_repl → codex → node`. Do not ad-hoc sign `codex`, the bundled Node,
 or `node_repl`, and do not replace this with a bypass in the authorization module.
+
+Where that `codex` lives is an upstream detail that has already moved once. Up to
+26.917 it was a bare `Resources/codex`; from 26.928 it is the main executable of a
+nested, separately sealed bundle,
+`Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`, and `Resources/codex-cli/`
+also carries the package metadata, `bin/codex-code-mode-host`, `codex-path/rg` and
+`codex-resources/` the binary finds relative to itself. Spawn that executable, not
+the `bin/codex` shell shim beside it, and verify the **bundle** rather than the
+binary, since the bundle's seal is what a copy can break. Both layouts stay
+supported, newest first, so a source that has not updated yet (or an older one
+pinned with `--source`) still builds: the adapter keeps the two paths in
+`_A_CODEX_CLI_APP` and `_A_CODEX_BARE`, `_a_codex_signed` picks whichever the
+bundle has, and `codex-cli-launcher.cjs` makes the same choice at run time. When
+it moves again, preflight stops with `Missing bundled codex executable` and names
+both paths it looked for, which is what that message is for.
+
+Two side effects of the move are easy to miss:
+
+- The app **appends** `dirname(CODEX_CLI_PATH)` to the app-server's `PATH` (only
+  if absent), which gives agent shells in the original a fallback `codex` behind any
+  the user installed. For a clone that directory is `Resources/`, which no longer
+  holds `codex`, so the `.cjs` launcher appends the `CodexCLI.app/Contents/MacOS`
+  directory the same way. Do not turn that into a prepend: it would shadow the
+  user's own `codex` in the clone but not in the original.
+- Preflight hard-fails unless the source's `CodexCLI.app` (or, on the old layout,
+  the bare `codex`) passes
+  `codesign --verify --strict -R='anchor apple generic'` — a valid seal under any
+  Apple-issued certificate, so an ad-hoc, unsigned or modified bundle is refused.
+  The post-copy assertion checks the same thing and the copy is byte-identical, so
+  without this the failure would only surface after the old clone had been
+  deleted. The pinned OpenAI identity stays a warning. That post-copy assertion
+  runs inside `a_sign_extra`, before the engine's own signing loops, so it guards
+  only what precedes it; none of those loops reaches `Resources/codex-cli/` today,
+  and a new one must not.
 
 Be accurate about what this does and does not preserve. The check the module
 enforces is "these three processes carry an OpenAI signing identity". After this
@@ -605,6 +673,28 @@ Do not convert this block into a real run.
   `grep -n 'a_cli_preflight\|dry-run: stopping here' clone-agent.sh` must print
   the preflight line first.
 
+**A sandboxed `HOME` can break `node` itself.** App targets run
+`tools/patch-asar-integrity-digest.js --check` in preflight, so even an app
+`--dry-run` needs a working `node`. A shim-based version manager (asdf, mise,
+nodenv, …) finds its install through `$HOME` and exits non-zero under the sandboxed
+one; preflight then stops with "node is required for app targets". (nvm puts an
+absolute directory on `PATH` and is unaffected.) Resolve the real binary with your
+own `HOME` first and put its directory at the front of the sandbox `PATH`:
+
+```zsh
+NODE_DIR="$(node -p 'require("path").dirname(process.execPath)')"   # real HOME
+PATH="$NODE_DIR:$PATH" HOME="$SBX/home" "$SBX/clone-agent.sh" SbxName --dry-run \
+  --app claude --target app --icon icons/example-claude.icns \
+  --dest-dir "$SBX/apps" \
+  --source "$SBX/src-app"
+```
+
+That directory usually holds globally installed npm CLIs too, often including
+`codex`, so the new `PATH` also changes which vendor binary a `cli` or `all`
+target resolves with `whence -p` and bakes into its launcher. The same shim
+problem hits those targets directly: `whence -p codex` returns the shim, and
+Codex's `a_cli_preflight` executes it.
+
 **The source app is neither `$HOME`- nor `--dest-dir`-relative.** `SRC` falls back
 to the adapter's absolute `A_SOURCE_DEFAULT` (`/Applications/Claude.app`,
 `/Applications/ChatGPT.app`), so without `--source` a run reads and preflights the
@@ -794,8 +884,9 @@ ps eww -p "$(pgrep -xf "/Applications/$NAME.app/Contents/MacOS/$NAME.*" | head -
 #    off the clone's ad-hoc-signed main binary, and all three must be OpenAI-signed.
 #    Then actually invoke Browser Use — nothing below proves the socket accepts it.
 ps -Ao pid=,ppid=,command= | grep "/Applications/$NAME.app" |
-  grep -E 'Resources/codex|cua_node/bin/node'
-codesign -dv "/Applications/$NAME.app/Contents/Resources/codex" 2>&1 | grep TeamIdentifier
+  grep -E 'CodexCLI\.app/Contents/MacOS/codex|Resources/codex |cua_node/bin/node'
+codesign -dv "/Applications/$NAME.app/Contents/Resources/codex-cli/CodexCLI.app" 2>&1 | grep TeamIdentifier
+# (before 26.928: codesign -dv "/Applications/$NAME.app/Contents/Resources/codex")
 # Expect: TeamIdentifier=2DC432GLL2 (NOT "not set" — that means it was ad-hoc re-signed)
 ```
 

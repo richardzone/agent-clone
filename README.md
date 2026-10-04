@@ -278,7 +278,7 @@ The substantive differences are isolated in `adapters/`:
 Codex's keychain service names — `Codex Safe Storage`, `Codex Storage Key`,
 `Codex MCP Credentials` — come from a compile-time product-name constant in
 `Codex Framework` for the first two, and are hard-coded in the Rust binary at
-`Contents/Resources/codex` for the third (`rmcp-client/src/oauth.rs`). **None are
+`Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex` for the third (`rmcp-client/src/oauth.rs`). **None are
 affected by `productName`**, so clones share these entries with the original.
 
 In practice this barely matters, because **Codex stores its login in
@@ -308,6 +308,11 @@ adapters/README.md                  adapter interface contract
 adapters/claude.sh                  Claude support
 adapters/codex.sh                   Codex support
 tools/patch-asar-productname.js     in-place productName rewrite inside app.asar
+tools/patch-asar-integrity-digest.js
+                                    checks (preflight) and re-syncs (step 7) the ASAR
+                                    integrity digest newer Electron embeds in its framework
+tools/test-patch-asar-integrity-digest.js
+                                    synthetic Mach-O regression checks for the above
 tools/write-config-library.js       Claude's local-tier policy file (disables auto-update)
 tools/make-icon.sh                  png -> icns (crop, center, round, all sizes)
 tools/codex-cli-launcher            copied into a Codex clone; keeps an OpenAI-signed

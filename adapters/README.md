@@ -170,8 +170,8 @@ the real main binary → the outer bundle.
 So handle only what those loops don't reach: helpers, `Libraries/` and `PlugIns/`
 *inside* a framework, plus any standalone binaries the bundle ships. An adapter
 may deliberately preserve an upstream signature instead: Codex must keep the
-Developer ID signature on `Contents/Resources/codex` for Browser Use peer
-authentication.
+Developer ID signature on `Contents/Resources/codex-cli/CodexCLI.app` (a bare
+`Contents/Resources/codex` before 26.928) for Browser Use peer authentication.
 
 Work **inside-out** here as well: deepest first, so the outer seals cover what is
 already signed. **Never sign with `codesign --deep`** — Apple deprecated it for
