@@ -34,10 +34,23 @@ A_CLI_HOME_TEMPLATE="$A_CODEX_HOME_TEMPLATE"
 A_CLI_ENV_NAMESPACES=('OPENAI_*' 'CODEX_*')
 
 # The app-server binary ships as its own signed bundle inside Resources (since
-# 26.928; earlier builds had a bare Resources/codex). Its seal and Developer ID
-# signature are what Browser Use checks, so it is copied, never re-signed.
-# tools/codex-cli-launcher.cjs spawns the same path.
+# 26.928); earlier builds had a bare, standalone-signed Resources/codex. Both
+# layouts are supported, newest first. Its seal and Developer ID signature are
+# what Browser Use checks, so it is copied, never re-signed.
+# tools/codex-cli-launcher.cjs picks between the same two paths.
 _A_CODEX_CLI_APP='Contents/Resources/codex-cli/CodexCLI.app'
+_A_CODEX_BARE='Contents/Resources/codex'
+
+# The signed code to verify for a bundle's codex — the nested bundle on the new
+# layout, the bare binary on the old one — or nothing if neither is present.
+_a_codex_signed() {
+  local app="$1"
+  if [[ -x "$app/$_A_CODEX_CLI_APP/Contents/MacOS/codex" ]]; then
+    print "$app/$_A_CODEX_CLI_APP"
+  elif [[ -f "$app/$_A_CODEX_BARE" && -x "$app/$_A_CODEX_BARE" ]]; then
+    print "$app/$_A_CODEX_BARE"
+  fi
+}
 
 # The framework's version directory is named after the Chromium version (e.g.
 # 151.0.7922.76), not Claude's "A", so it can only be resolved through the
@@ -83,19 +96,19 @@ a_preflight() {
   if ! grep -qa 'CODEX_CLI_PATH' "$asar"; then
     print "CODEX_CLI_PATH not found in app.asar — Browser Use isolation may no longer work"; return 1
   fi
-  local codex_app="$src/$_A_CODEX_CLI_APP"
-  local codex_bin="$codex_app/Contents/MacOS/codex"
+  local codex_app="$(_a_codex_signed "$src")"
   local node_bin="$src/Contents/Resources/cua_node/bin/node"
   # Structural: without these two the launcher chain cannot be built at all.
-  [[ -x "$codex_bin" ]] ||
-    { print "Missing bundled codex executable (expected ${_A_CODEX_CLI_APP#Contents/}/Contents/MacOS/codex)"; return 1 }
+  [[ -n "$codex_app" ]] ||
+    { print "Missing bundled codex executable (expected ${_A_CODEX_CLI_APP#Contents/}/Contents/MacOS/codex, or ${_A_CODEX_BARE#Contents/} before 26.928)"; return 1 }
   [[ -x "$node_bin" ]] || { print "Missing bundled Node executable"; return 1 }
-  # Seal: a_sign_extra dies unless the copied CodexCLI.app still carries an
-  # Apple-issued signature, and the copy is byte-identical to this source — so a
-  # source that fails here would fail there too, only after step 2 has already
-  # deleted the working clone. Refuse now, before any write.
+  print "   Bundled codex ✓ (${codex_app#$src/Contents/})"
+  # Seal: a_sign_extra dies unless the copied codex still carries an Apple-issued
+  # signature, and the copy is byte-identical to this source — so a source that
+  # fails here would fail there too, only after step 2 has already deleted the
+  # working clone. Refuse now, before any write.
   codesign --verify --strict -R='anchor apple generic' "$codex_app" 2>/dev/null ||
-    { print "${_A_CODEX_CLI_APP#Contents/} in the source has no valid Apple-issued signature — reinstall the source app"; return 1 }
+    { print "${codex_app#$src/Contents/} in the source has no valid Apple-issued signature — reinstall the source app"; return 1 }
   # Identity: only Browser Use depends on these, and the identifiers and Team ID
   # below are pinned to what OpenAI ships today. If they rotate either, the clone
   # itself is still fine and the chain may well still be accepted under the new
@@ -223,8 +236,10 @@ a_sign_extra() {
   # left of ||), so set -e is live inside it: a bare failing command here would
   # abort the whole run with no message at all — and by this point step 2 has
   # already deleted the previously working clone.
-  codesign --verify --strict -R='anchor apple generic' "$app/$_A_CODEX_CLI_APP" >/dev/null 2>&1 ||
-    die "${_A_CODEX_CLI_APP#Contents/} lost its Developer ID signature during the copy — Browser Use would not authorize"
+  local codex_signed="$(_a_codex_signed "$app")"
+  [[ -n "$codex_signed" ]] || die "The copied bundle has no codex executable — Browser Use would not start"
+  codesign --verify --strict -R='anchor apple generic' "$codex_signed" >/dev/null 2>&1 ||
+    die "${codex_signed#$app/Contents/} lost its Developer ID signature during the copy — Browser Use would not authorize"
   for f in "$app/Contents/Resources/native/"*; do
     [[ -f "$f" ]] && codesign --force --sign - "$f" >/dev/null 2>&1
   done

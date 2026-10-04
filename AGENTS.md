@@ -366,11 +366,13 @@ nested, separately sealed bundle,
 also carries the package metadata, `bin/codex-code-mode-host`, `codex-path/rg` and
 `codex-resources/` the binary finds relative to itself. Spawn that executable, not
 the `bin/codex` shell shim beside it, and verify the **bundle** rather than the
-binary, since the bundle's seal is what a copy can break. The adapter keeps the
-path in `_A_CODEX_CLI_APP` and `codex-cli-launcher.cjs` repeats it; when it moves
-again, preflight stops with `Missing bundled codex executable` and names the path it
-expected, which is what that message is for. Only the new layout is supported, so a
-pre-26.928 source is refused by that same message rather than half-built.
+binary, since the bundle's seal is what a copy can break. Both layouts stay
+supported, newest first, so a source that has not updated yet (or an older one
+pinned with `--source`) still builds: the adapter keeps the two paths in
+`_A_CODEX_CLI_APP` and `_A_CODEX_BARE`, `_a_codex_signed` picks whichever the
+bundle has, and `codex-cli-launcher.cjs` makes the same choice at run time. When
+it moves again, preflight stops with `Missing bundled codex executable` and names
+both paths it looked for, which is what that message is for.
 
 Two side effects of the move are easy to miss:
 
@@ -380,7 +382,8 @@ Two side effects of the move are easy to miss:
   holds `codex`, so the `.cjs` launcher appends the `CodexCLI.app/Contents/MacOS`
   directory the same way. Do not turn that into a prepend: it would shadow the
   user's own `codex` in the clone but not in the original.
-- Preflight hard-fails unless the source's `CodexCLI.app` passes
+- Preflight hard-fails unless the source's `CodexCLI.app` (or, on the old layout,
+  the bare `codex`) passes
   `codesign --verify --strict -R='anchor apple generic'` — a valid seal under any
   Apple-issued certificate, so an ad-hoc, unsigned or modified bundle is refused.
   The post-copy assertion checks the same thing and the copy is byte-identical, so
@@ -881,8 +884,9 @@ ps eww -p "$(pgrep -xf "/Applications/$NAME.app/Contents/MacOS/$NAME.*" | head -
 #    off the clone's ad-hoc-signed main binary, and all three must be OpenAI-signed.
 #    Then actually invoke Browser Use — nothing below proves the socket accepts it.
 ps -Ao pid=,ppid=,command= | grep "/Applications/$NAME.app" |
-  grep -E 'CodexCLI\.app/Contents/MacOS/codex|cua_node/bin/node'
+  grep -E 'CodexCLI\.app/Contents/MacOS/codex|Resources/codex |cua_node/bin/node'
 codesign -dv "/Applications/$NAME.app/Contents/Resources/codex-cli/CodexCLI.app" 2>&1 | grep TeamIdentifier
+# (before 26.928: codesign -dv "/Applications/$NAME.app/Contents/Resources/codex")
 # Expect: TeamIdentifier=2DC432GLL2 (NOT "not set" — that means it was ad-hoc re-signed)
 ```
 
