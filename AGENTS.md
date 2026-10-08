@@ -146,8 +146,9 @@ signatures on nested helpers. The correct order is: adapter-specific deep conten
 (helpers inside the framework, `Libraries`, `PlugIns`) → the frameworks themselves
 → native modules outside the asar → the real main binary → **the outer bundle
 last**, so its seal covers everything already signed. Codex's bundled
-`Resources/codex-cli/` subtree (above all its `CodexCLI.app`) is the deliberate
-exception: keep its original Developer ID signatures (section 13).
+`Resources/codex-cli/` subtree (above all its `CodexCLI.app`), or the bare
+`Resources/codex` before 26.928, is the deliberate exception: keep its original
+Developer ID signatures (section 13).
 
 `--deep` is fine — and recommended — for **verification**
 (`codesign --verify --deep --strict`).
@@ -370,7 +371,15 @@ binary, since the bundle's seal is what a copy can break. Both layouts stay
 supported, newest first, so a source that has not updated yet (or an older one
 pinned with `--source`) still builds: the adapter keeps the two paths in
 `_A_CODEX_CLI_APP` and `_A_CODEX_BARE`, `_a_codex_signed` picks whichever the
-bundle has, and `codex-cli-launcher.cjs` makes the same choice at run time. When
+bundle has, and `codex-cli-launcher.cjs` makes the same choice at run time. Both
+sides apply one test to the nested layout — its executable must be a regular file
+the current user may execute (stat plus `access(2)` `X_OK`, not merely a mode bit)
+— and `tools/test-codex-layout.sh` asserts they agree on every shape it builds
+(both layouts, a non-executable or directory nested or bare path, a dangling or
+live symlink at the nested path); if they ever differ, preflight verifies one binary while the clone
+spawns another. The launcher falls back to the bare path without testing it,
+which is safe only because preflight refused the build unless one layout
+qualified. When
 it moves again, preflight stops with `Missing bundled codex executable` and names
 both paths it looked for, which is what that message is for.
 
@@ -829,7 +838,7 @@ names into a command against an unrelated live instance.
 ```bash
 NAME=MyCodex
 # Set SOURCE_APP to the actual source bundle selected by this profile/adapter.
-SOURCE_APP=/Applications/Codex.app
+SOURCE_APP=/Applications/ChatGPT.app
 
 # 1. Version matches the original
 /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$SOURCE_APP/Contents/Info.plist"
@@ -991,3 +1000,42 @@ aborts and names what is missing.
 
 This is deliberate: better a clear abort than silently producing an app that
 installs and doesn't work. Fix the assumption in the relevant adapter and re-run.
+
+Not every refusal means the adapter is out of date. Read the message first:
+
+- **`Missing bundled codex executable`** names both paths it looked for. If a
+  following line says one of them `is present but not an executable regular file`,
+  the install is broken (a directory, a lost execute bit): reinstall the source
+  app. Otherwise the bundled CLI has moved again — see section 13 for where it
+  lived before and how the adapter and launcher choose between layouts; update
+  both together.
+- **`… has no valid Apple-issued signature — reinstall the source app`**, followed
+  by a `codesign:` line with codesign's own first line of output (for example
+  `code object is not signed at all`, `invalid signature (code or signature have
+  been modified)`, or `code failed to satisfy specified code requirement(s)` for
+  ad-hoc). The source's bundled codex is unsigned, modified or ad-hoc signed. That
+  is a broken install, not a layout change: reinstall the original app rather than
+  relaxing the check (section 13).
+- **`Preflight failed: embedded ASAR integrity digest`** comes from
+  `tools/patch-asar-integrity-digest.js --check`, which prints the specific reason
+  first:
+  - `stored integrity digest does not match this plist` — upstream changed the
+    digest formula, **or** the source bundle was modified: reinstall it first, and
+    only if it still fails treat it as an upstream change (section 3). The same
+    goes for:
+    - `__asar_integrity section has an unknown layout`
+    - `__asar_integrity digest version … is not supported`
+    - `integrity sentinel found outside an __asar_integrity section`
+    - `has an __asar_integrity section the patch step does not reach`
+    - `executable resolves outside the bundle`
+  - `… disappeared while being read` — the source changed under the scan, usually
+    the vendor's updater: wait for it to finish and run again.
+  - `cannot <list|read|resolve|…> <path> (<errno>)` — a permission or I/O problem
+    in the source; the build's own copy would hit it too.
+  - `has no Contents directory` — the path given is not an app bundle.
+  - Anything else the tool prints (an unreadable `ElectronAsarIntegrity`
+    dictionary, a binary holding the sentinel that is not 64-bit Mach-O, load
+    commands it cannot parse): reinstall the source first, and only if it still
+    fails treat it as an upstream change (section 3).
+- **`node is required for app targets`** — see section 15 on shims under a
+  sandboxed `HOME`.

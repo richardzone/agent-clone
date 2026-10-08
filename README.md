@@ -278,7 +278,7 @@ The substantive differences are isolated in `adapters/`:
 Codex's keychain service names — `Codex Safe Storage`, `Codex Storage Key`,
 `Codex MCP Credentials` — come from a compile-time product-name constant in
 `Codex Framework` for the first two, and are hard-coded in the Rust binary at
-`Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex` for the third (`rmcp-client/src/oauth.rs`). **None are
+`Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex` (`Contents/Resources/codex` before 26.928) for the third (`rmcp-client/src/oauth.rs`). **None are
 affected by `productName`**, so clones share these entries with the original.
 
 In practice this barely matters, because **Codex stores its login in
@@ -317,6 +317,7 @@ tools/write-config-library.js       Claude's local-tier policy file (disables au
 tools/make-icon.sh                  png -> icns (crop, center, round, all sizes)
 tools/codex-cli-launcher            copied into a Codex clone; keeps an OpenAI-signed
 tools/codex-cli-launcher.cjs          Node parent above codex so Browser Use works
+tools/test-codex-layout.sh          checks the adapter and launcher pick the same codex
 icons/                              icon sources and generated .icns
 profiles/example.conf.sample        profile field reference
 profiles/*.conf                     per-clone parameters, generated (not tracked)

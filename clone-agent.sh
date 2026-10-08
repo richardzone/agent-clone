@@ -553,7 +553,7 @@ if (( TARGET_APP )); then
   node --version >/dev/null 2>&1 ||
     die "node is required for app targets but '$(whence -p node || print node)' does not run"
   node "$REPO_DIR/tools/patch-asar-integrity-digest.js" --check "$SRC" ||
-    die "Preflight failed: embedded ASAR integrity digest — see AGENTS.md section 3"
+    die "Preflight failed: embedded ASAR integrity digest — see \"When preflight fails\" in AGENTS.md"
 fi
 if (( TARGET_CLI )); then
   [[ -n "$A_CLI_COMMAND" && -n "$A_CLI_HOME_TEMPLATE" && ${#A_CLI_ENV_NAMESPACES} -gt 0 ]] ||

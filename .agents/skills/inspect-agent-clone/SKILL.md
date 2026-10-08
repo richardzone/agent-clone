@@ -13,8 +13,9 @@ secrets or source an unknown profile just to learn its fields.
 
 Start with read-only checks for the affected surface, not a full live matrix.
 Record repository revision, inspected paths, source/clone versions and observed
-running process identity. Do not assume `/Applications/Codex.app` or a default
-CLI command when the profile overrides it.
+running process identity. Do not assume the adapter's default source (Codex
+ships as `/Applications/ChatGPT.app`) or a default CLI command when the profile
+overrides it.
 
 ## App evidence
 
