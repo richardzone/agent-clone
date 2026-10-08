@@ -66,6 +66,14 @@ anchors+=(
   "$CODEX§, or \${_A_CODEX_BARE#Contents/} before 26.928)§the missing-codex message names both paths"
   "$DIGEST§disappeared while being read§the mid-scan change refusal"
   "$DIGEST§stored integrity digest does not match this plist§the formula/modified refusal"
+  "$DIGEST§__asar_integrity section has an unknown layout§the unknown-layout refusal"
+  "$DIGEST§is not supported\`§the unknown-version refusal"
+  "$DIGEST§integrity sentinel found outside an __asar_integrity section§the stray-sentinel refusal"
+  "$DIGEST§has an __asar_integrity section the patch step does not reach§the unreached-slot refusal"
+  "$DIGEST§executable resolves outside the bundle§the out-of-bundle refusal"
+  "$DIGEST§cannot \${what} \${rel}§the named filesystem-error refusal"
+  "$DIGEST§has no Contents directory§the not-an-app refusal"
+  'clone-agent.sh§a_preflight "$SRC" || die "Preflight failed — see \"When preflight fails\"§the adapter-preflight die points at "When preflight fails"'
   'clone-agent.sh§embedded ASAR integrity digest — see \"When preflight fails\"§the digest die points at "When preflight fails"'
 )
 
@@ -118,6 +126,16 @@ doc_must+=(
   'disappeared while being read§the mid-scan change quote'
   '`node is required for app targets`** — see section 15§the node refusal points at section 15'
   '`Missing bundled codex executable`** names both paths§the missing-codex both-paths claim'
+  '## When preflight fails§the section both engine preflight dies point to'
+  '`__asar_integrity section has an unknown layout`§the unknown-layout quote'
+  '`__asar_integrity digest version … is not supported`§the unknown-version quote'
+  '`integrity sentinel found outside an __asar_integrity section`§the stray-sentinel quote'
+  '`has an __asar_integrity section the patch step does not reach`§the unreached-slot quote'
+  '`executable resolves outside the bundle`§the out-of-bundle quote'
+  '`cannot <list|read|resolve|…> <path> (<errno>)`§the filesystem-error quote'
+  '`has no Contents directory`§the not-an-app quote'
+  'which prints the specific reason§the tool-prints-its-reason-first claim'
+  'SOURCE_APP=/Applications/ChatGPT.app§the checklist names the real Codex source'
 )
 for d in $doc_must; do
   frag="${d%%§*}"; what="${d#*§}"

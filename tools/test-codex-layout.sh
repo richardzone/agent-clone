@@ -142,6 +142,30 @@ app="$(mkapp r)"
 PATH="/usr/bin:/bin" "$NODE" "$app/Contents/Resources/codex-cli-launcher.cjs" >/dev/null 2>&1; rc=$?
 check "a failed spawn exits non-zero" "$([[ $rc != 0 ]]; print $?)" "rc=$rc"
 
+print "\npreflight's missing-codex message"
+# a_preflight on a minimal stub bundle: just enough framework and asar for it to
+# reach the codex check, which needs no codesign when nothing qualifies.
+pre_app() {  # $1 name, then layout words as for mkapp
+  local app="$(mkapp "$@")" fw
+  fw="$app/Contents/Frameworks/Codex Framework.framework"
+  mkdir -p "$fw/Versions/A/Helpers"; ln -s A "$fw/Versions/Current"
+  print 'CODEX_HOME CODEX_SPARKLE_ENABLED CODEX_CLI_PATH' > "$app/Contents/Resources/app.asar"
+  stub "$app/Contents/Resources/cua_node/bin/node"
+  print "$app"
+}
+pre_out() { a_preflight "$1" 2>&1; print "rc=$?" }
+out="$(pre_out "$(pre_app m1 new-noexec)")"
+check "non-executable nested codex: refused" "$([[ "$out" == *"Missing bundled codex executable"*"rc=1" ]]; print $?)" "$out"
+check "…names both paths it looked for" "$([[ "$out" == *"CodexCLI.app/Contents/MacOS/codex, or Resources/codex before 26.928"* ]]; print $?)" "$out"
+check "…and says the nested file is a broken install" \
+  "$([[ "$out" == *"CodexCLI.app/Contents/MacOS/codex is present but not an executable regular file"* ]]; print $?)" "$out"
+out="$(pre_out "$(pre_app m2 new-dir bare-dir)")"
+check "directories at both paths: both reported as broken" \
+  "$([[ "$out" == *"MacOS/codex is present but not"* && "$out" == *"Resources/codex is present but not"* ]]; print $?)" "$out"
+out="$(pre_out "$(pre_app m3)")"
+check "nothing at either path: no broken-install line" \
+  "$([[ "$out" == *"Missing bundled codex executable"* && "$out" != *"present but not"* ]]; print $?)" "$out"
+
 print ""
 (( fail )) && { print "FAILED ($n checks)"; exit 1 }
 print "all $n checks passed"

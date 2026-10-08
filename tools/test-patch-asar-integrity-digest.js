@@ -312,11 +312,15 @@ try {
   //     A preload makes one fs function fail for one path, as a race (ENOENT:
   //     the source being updated mid-read) or an I/O error would.
   {
-    const failing = (name, fn, match, code) => {
+    // `flags`, when set, must also equal the call's second argument: readFileSync
+    // goes through fs.openSync internally (flag 'r'), so failing every open of the
+    // binary would trip the read guard first and never reach patch mode's own
+    // openSync(bin, 'r+') — a test that passes without the guard it names.
+    const failing = (name, fn, match, code, flags) => {
       const preload = path.join(root, `fail-${name}.js`);
       fs.writeFileSync(preload, `const fs = require('fs'); const real = fs.${fn};
 fs.${fn} = function (p, ...a) {
-  if (${JSON.stringify(fn)} === 'writeSync' || String(p).endsWith(${JSON.stringify(match)})) {
+  if (${flags ? `a[0] === ${JSON.stringify(flags)} && ` : ''}(${JSON.stringify(fn)} === 'writeSync' || String(p).endsWith(${JSON.stringify(match)}))) {
     const e = new Error(${JSON.stringify(code)}); e.code = ${JSON.stringify(code)}; throw e;
   }
   return real.call(this, p, ...a);
@@ -329,15 +333,15 @@ fs.${fn} = function (p, ...a) {
       ['fw-realpath', 'realpathSync', '/Versions/Current/E', 'ENOENT', '--check', /E disappeared while being read/],
       ['fw-read', 'readFileSync', '/Versions/A/E', 'ENOENT', '--check', /E disappeared while being read/],
       ['fw-list', 'readdirSync', '/Contents/Frameworks', 'EACCES', '--check', /cannot list Contents\/Frameworks \(EACCES\)/],
-      ['patch-open', 'openSync', '/Versions/A/E', 'ENOENT', null, /E disappeared while being read/],
+      ['patch-open', 'openSync', '/Versions/A/E', 'EACCES', null, /cannot open for writing .*E \(EACCES\)/, 'r+'],
       ['patch-write', 'writeSync', '', 'EIO', null, /cannot write .*E \(EIO\)/],
     ];
-    for (const [name, fn, match, code, mode, want] of cases) {
+    for (const [name, fn, match, code, mode, want, flags] of cases) {
       const app = makeApp(`guard-${name}`, {
         frameworks: { 'E.framework': { binary: slice({ digest: mode ? EXPECTED : Buffer.alloc(32) }) } },
         extra: { 'Contents/Resources/vanishing.js': Buffer.from('x') },
       });
-      const args = ['-r', failing(name, fn, match, code), TOOL, ...(mode ? [mode] : []), app];
+      const args = ['-r', failing(name, fn, match, code, flags), TOOL, ...(mode ? [mode] : []), app];
       const r = spawnSync(process.execPath, args, { encoding: 'utf8' });
       check(`guarded ${name} (${code}) is refused by name`,
         r.status !== 0 && want.test(r.stderr) && noTrace(r.stderr) && !/✓/.test(r.stderr), r.stderr);
@@ -348,6 +352,13 @@ fs.${fn} = function (p, ...a) {
     const r = run('--check', path.join(root, 'no-such.app'));
     check('a nonexistent bundle is not called "disappeared"',
       r.code !== 0 && /cannot resolve .*no-such\.app \(ENOENT\)/.test(r.err) && !/disappeared/.test(r.err), r.err);
+  }
+  // 22. An existing directory with no Contents/ is not an app, not an update
+  for (const mode of ['--check', null]) {
+    const dir = fs.mkdtempSync(path.join(root, 'empty-'));
+    const r = run(...(mode ? [mode] : []), dir);
+    check(`a directory without Contents is refused as not an app (${mode || 'patch'})`,
+      r.code !== 0 && /has no Contents directory/.test(r.err) && !/disappeared/.test(r.err), r.err);
   }
 } finally {
   fs.rmSync(root, { recursive: true, force: true });

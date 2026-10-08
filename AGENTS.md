@@ -374,9 +374,9 @@ pinned with `--source`) still builds: the adapter keeps the two paths in
 bundle has, and `codex-cli-launcher.cjs` makes the same choice at run time. Both
 sides apply one test to the nested layout — its executable must be a regular file
 the current user may execute (stat plus `access(2)` `X_OK`, not merely a mode bit)
-— and `tools/test-codex-layout.sh` asserts they agree on every shape (both
-layouts, a non-executable or directory nested or bare path, dangling and live
-symlinks); if they ever differ, preflight verifies one binary while the clone
+— and `tools/test-codex-layout.sh` asserts they agree on every shape it builds
+(both layouts, a non-executable or directory nested or bare path, a dangling or
+live symlink at the nested path); if they ever differ, preflight verifies one binary while the clone
 spawns another. The launcher falls back to the bare path without testing it,
 which is safe only because preflight refused the build unless one layout
 qualified. When
@@ -1022,12 +1022,20 @@ Not every refusal means the adapter is out of date. Read the message first:
   - `stored integrity digest does not match this plist` — upstream changed the
     digest formula, **or** the source bundle was modified: reinstall it first, and
     only if it still fails treat it as an upstream change (section 3). The same
-    goes for `unknown layout`, `version … is not supported`, `sentinel found
-    outside an __asar_integrity section`, `has an __asar_integrity section the
-    patch step does not reach` and `executable resolves outside the bundle`.
+    goes for:
+    - `__asar_integrity section has an unknown layout`
+    - `__asar_integrity digest version … is not supported`
+    - `integrity sentinel found outside an __asar_integrity section`
+    - `has an __asar_integrity section the patch step does not reach`
+    - `executable resolves outside the bundle`
   - `… disappeared while being read` — the source changed under the scan, usually
     the vendor's updater: wait for it to finish and run again.
   - `cannot <list|read|resolve|…> <path> (<errno>)` — a permission or I/O problem
     in the source; the build's own copy would hit it too.
+  - `has no Contents directory` — the path given is not an app bundle.
+  - Anything else the tool prints (an unreadable `ElectronAsarIntegrity`
+    dictionary, a binary holding the sentinel that is not 64-bit Mach-O, load
+    commands it cannot parse): reinstall the source first, and only if it still
+    fails treat it as an upstream change (section 3).
 - **`node is required for app targets`** — see section 15 on shims under a
   sandboxed `HOME`.

@@ -194,6 +194,9 @@ function guarded(p, what, fn, { found = true } = {}) {
 
 // --- the binaries the patch step reaches: each framework's own executable ---
 const appReal = guarded(appPath, 'resolve', () => fs.realpathSync(appPath), { found: false });
+// Like the bundle path itself, a missing Contents/ is the caller's mistake, not a
+// file that vanished mid-read — say so before anything treats it as the latter.
+if (!fs.existsSync(path.join(appPath, 'Contents'))) fail(`${appPath} has no Contents directory — not an app bundle`);
 const frameworksDir = path.join(appPath, 'Contents', 'Frameworks');
 const targets = [];
 if (fs.existsSync(frameworksDir)) {
