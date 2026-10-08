@@ -11,6 +11,7 @@
 # Resources/ tree in a fresh temp dir with stub executables, asks both sides,
 # and compares. No real app is read or written. Needs `node` on PATH.
 set -u
+umask 022   # fixtures need traversable dirs and the exact modes set below
 REPO="${0:A:h:h}"
 T="$(mktemp -d)"; T="${T:A}"   # /var -> /private/var: node reports real paths
 trap 'rm -rf "$T"' EXIT
@@ -32,7 +33,7 @@ echo "pathdup $(printf %s "$PATH" | tr : "\n" | grep -cxF "$(dirname "$0")")"
 echo "clipath ${CODEX_CLI_PATH-unset}"
 echo "args $*"
 exit 7' > "$1"
-  chmod +x "$1"
+  chmod 755 "$1"   # explicit mode: +x would honour an unusual umask
 }
 
 # Build an app for one case. $1 name, then layout words:
@@ -42,6 +43,7 @@ exit 7' > "$1"
 #   new-dangle nested path is a dangling symlink
 #   new-link   nested path is a symlink to an executable file
 #   bare       old-layout Resources/codex executable
+#   bare-noexec old-layout file without the execute bit
 #   bare-dir   old-layout path is a directory
 mkapp() {
   local app="$T/$1.app" w; shift
@@ -56,6 +58,7 @@ mkapp() {
       new-dangle) mkdir -p "${nested:h}"; ln -s "$T/nowhere" "$nested" ;;
       new-link)   stub "$T/$app:t-target"; mkdir -p "${nested:h}"; ln -s "$T/$app:t-target" "$nested" ;;
       bare)       stub "$res/codex" ;;
+      bare-noexec) stub "$res/codex"; chmod 644 "$res/codex" ;;
       bare-dir)   mkdir -p "$res/codex" ;;
     esac
   done
@@ -74,7 +77,7 @@ adapter_exe() {
 
 # What the launcher spawns: the "ran …" line, or "" when the spawn failed.
 launcher_run() {  # $1 app, $2 PATH to hand it
-  PATH="$2" "$NODE" "$1/Contents/Resources/codex-cli-launcher.cjs" --version 2>/dev/null
+  PATH="$2" "$NODE" "$1/Contents/Resources/codex-cli-launcher.cjs" --version 2>&1
 }
 
 expect_choice() {  # $1 description, $2 app, $3 expected: new | bare | none
@@ -90,6 +93,8 @@ expect_choice() {  # $1 description, $2 app, $3 expected: new | bare | none
   check "$1: adapter picks $3" "$([[ "$exe" == "$want" ]]; print $?)" "got '${exe#$T/}'"
   if [[ $3 == none ]]; then
     check "$1: launcher runs nothing" "$([[ -z "$ran" ]]; print $?)" "ran '${ran#$T/}'"
+    check "$1: launcher reports the failed spawn" \
+      "$([[ "$out" == *"Failed to launch the bundled codex binary"* ]]; print $?)" "$out"
   else
     check "$1: launcher runs the same binary" "$([[ "${ran:A}" == "${want:A}" ]]; print $?)" "ran '${ran#$T/}'"
   fi
@@ -110,6 +115,8 @@ expect_choice "nested dir, nothing else"     "$(mkapp f new-dir)"          none
 expect_choice "nested dangling symlink"      "$(mkapp g new-dangle bare)"  bare
 expect_choice "nested symlink to a binary"   "$(mkapp h new-link)"         new
 expect_choice "bare path is a directory"     "$(mkapp i bare-dir)"         none
+expect_choice "bare not executable"          "$(mkapp k bare-noexec)"      none
+expect_choice "nested ok, bare not exec"     "$(mkapp l new bare-noexec)"  new
 expect_choice "neither layout"               "$(mkapp j)"                  none
 
 print "\nPATH handling (append, only if absent)"

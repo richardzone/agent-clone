@@ -43,10 +43,10 @@ _A_CODEX_BARE='Contents/Resources/codex'
 
 # The signed code to verify for a bundle's codex — the nested bundle on the new
 # layout, the bare binary on the old one — or nothing if neither is present.
-# A layout counts only if its executable is a regular file with the execute bit
-# (-f and -x, both following symlinks). tools/codex-cli-launcher.cjs applies the
-# same test at run time; if the two ever differ, preflight can verify one binary
-# while the clone spawns the other.
+# A layout counts only if its executable is a regular file the current user may
+# execute (-f and -x: stat plus access(2) X_OK, both following symlinks).
+# tools/codex-cli-launcher.cjs applies the same test at run time; if the two ever
+# differ, preflight can verify one binary while the clone spawns the other.
 _a_codex_signed() {
   local app="$1"
   local nested="$app/$_A_CODEX_CLI_APP/Contents/MacOS/codex"
@@ -105,17 +105,27 @@ a_preflight() {
   local node_bin="$src/Contents/Resources/cua_node/bin/node"
   # Structural: without these two the launcher chain cannot be built at all.
   [[ -n "$codex_app" ]] ||
-    { print "Missing bundled codex executable (expected ${_A_CODEX_CLI_APP#Contents/}/Contents/MacOS/codex, or ${_A_CODEX_BARE#Contents/} before 26.928)"; return 1 }
+    { print "Missing bundled codex executable (expected ${_A_CODEX_CLI_APP#Contents/}/Contents/MacOS/codex, or ${_A_CODEX_BARE#Contents/} before 26.928)"
+      # Something there that is not an executable regular file is a broken
+      # install, not a layout move — say so, or the fix looks like an adapter edit.
+      local p
+      for p in "$src/$_A_CODEX_CLI_APP/Contents/MacOS/codex" "$src/$_A_CODEX_BARE"; do
+        [[ -e "$p" || -L "$p" ]] &&
+          print "   ${p#$src/Contents/} is present but not an executable regular file — reinstall the source app"
+      done
+      return 1 }
   [[ -x "$node_bin" ]] || { print "Missing bundled Node executable"; return 1 }
   print "   Bundled codex ✓ (${codex_app#$src/Contents/})"
   # Seal: a_sign_extra dies unless the copied codex still carries an Apple-issued
   # signature, and the copy is byte-identical to this source — so a source that
   # fails here would fail there too, only after step 2 has already deleted the
   # working clone. Refuse now, before any write.
+  # codesign puts the reason on its first line; unsigned and modified code add an
+  # "In architecture: …" line after it, so the last line is the wrong one to show.
   local why
   why="$(codesign --verify --strict -R='anchor apple generic' "$codex_app" 2>&1)" ||
     { print "${codex_app#$src/Contents/} in the source has no valid Apple-issued signature — reinstall the source app"
-      print "   codesign: ${why##*$'\n'}"; return 1 }
+      print "   codesign: ${why%%$'\n'*}"; return 1 }
   # Identity: only Browser Use depends on these, and the identifiers and Team ID
   # below are pinned to what OpenAI ships today. If they rotate either, the clone
   # itself is still fine and the chain may well still be accepted under the new
@@ -246,7 +256,7 @@ a_sign_extra() {
   local codex_signed="$(_a_codex_signed "$app")" why
   [[ -n "$codex_signed" ]] || die "The copied bundle has no codex executable — Browser Use would not start"
   why="$(codesign --verify --strict -R='anchor apple generic' "$codex_signed" 2>&1)" ||
-    die "${codex_signed#$app/Contents/} lost its Developer ID signature during the copy — Browser Use would not authorize (codesign: ${why##*$'\n'})"
+    die "${codex_signed#$app/Contents/} lost its Developer ID signature during the copy — Browser Use would not authorize (codesign: ${why%%$'\n'*})"
   for f in "$app/Contents/Resources/native/"*; do
     [[ -f "$f" ]] && codesign --force --sign - "$f" >/dev/null 2>&1
   done

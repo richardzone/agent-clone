@@ -12,9 +12,11 @@ const env = { ...process.env };
 delete env.CODEX_CLI_PATH;
 
 // Keep in step with _a_codex_signed in adapters/codex.sh: the nested bundle since
-// 26.928, else the bare binary earlier builds shipped. A layout counts only if
-// its executable is a regular file with the execute bit — the same test preflight
-// used to choose the binary it verified, so the clone never spawns another one.
+// 26.928, else the bare binary earlier builds shipped. The nested layout counts
+// only if its executable is a regular file the current user may execute (stat
+// plus access X_OK) — the same test preflight used to choose the binary it
+// verified, so the clone never spawns another one. The bare path needs no test
+// here: preflight refused the build unless one of the two qualified.
 const isExecutableFile = (p) => {
   try {
     if (!fs.statSync(p).isFile()) return false;

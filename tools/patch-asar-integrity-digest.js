@@ -150,12 +150,7 @@ function sentinelOffsets(buf) {
 
 // Validate every slot in one binary; return them, or [] if it holds none.
 function slotsIn(bin, label) {
-  let buf;
-  try {
-    buf = fs.readFileSync(bin);
-  } catch (e) {
-    fail(`${label}: cannot read ${bin} (${e.code || e.message})`);
-  }
+  const buf = guarded(bin, 'read', () => fs.readFileSync(bin));
   const hits = sentinelOffsets(buf);
   if (hits.length === 0) return { buf, slots: [] };
   let slots;
@@ -180,15 +175,17 @@ function slotsIn(bin, label) {
 }
 
 // Every filesystem call that can fail goes through this, so a failure is refused
-// with the path named instead of a stack trace. ENOENT on something just listed
-// means the bundle changed mid-read — typically the vendor's updater rewriting
-// the source — which a rebuild must not copy half-way through either.
-function guarded(p, what, fn) {
+// with the path named instead of a stack trace. ENOENT on something just found
+// inside the bundle means the bundle changed mid-read — typically the vendor's
+// updater rewriting the source — which a rebuild must not copy half-way through
+// either. The bundle path itself is the caller's input, so for it (found=false)
+// ENOENT just means it does not exist.
+function guarded(p, what, fn, { found = true } = {}) {
   try {
     return fn();
   } catch (e) {
     const rel = path.relative(appPath, p) || p;
-    if (e.code === 'ENOENT') {
+    if (e.code === 'ENOENT' && found) {
       return fail(`${rel} disappeared while being read — the app is changing (an update in progress?); retry once it has finished`);
     }
     return fail(`cannot ${what} ${rel} (${e.code || e.message})`);
@@ -196,7 +193,7 @@ function guarded(p, what, fn) {
 }
 
 // --- the binaries the patch step reaches: each framework's own executable ---
-const appReal = guarded(appPath, 'resolve', () => fs.realpathSync(appPath));
+const appReal = guarded(appPath, 'resolve', () => fs.realpathSync(appPath), { found: false });
 const frameworksDir = path.join(appPath, 'Contents', 'Frameworks');
 const targets = [];
 if (fs.existsSync(frameworksDir)) {
@@ -241,11 +238,13 @@ for (const { fw, bin } of targets) {
     continue;
   }
   const fd = guarded(bin, 'open for writing', () => fs.openSync(bin, 'r+'));
-  try {
-    for (const { offset } of used) fs.writeSync(fd, digest, 0, 32, offset + DIGEST);
-  } finally {
-    fs.closeSync(fd);
-  }
+  guarded(bin, 'write', () => {
+    try {
+      for (const { offset } of used) fs.writeSync(fd, digest, 0, 32, offset + DIGEST);
+    } finally {
+      fs.closeSync(fd);
+    }
+  });
   summary.push(`   ${fw}: embedded integrity digest re-synced in ${used.length} slice(s)${unusedNote}`);
 }
 

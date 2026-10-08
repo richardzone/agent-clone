@@ -57,6 +57,17 @@ anchors+=(
   "$LAUNCHER§isExecutableFile(bundledCodex)§the launcher applies the same test"
   "$LAUNCHER§\${currentPath}\${path.delimiter}\${codexDir}§the launcher appends to PATH"
 )
+# The messages "When preflight fails" quotes, each anchored where it is printed.
+DIGEST=tools/patch-asar-integrity-digest.js
+anchors+=(
+  "$CODEX§has no valid Apple-issued signature — reinstall the source app§the seal refusal"
+  "$CODEX§   codesign: \${why%%§the seal refusal shows codesign's first line"
+  "$CODEX§is present but not an executable regular file§the broken-install hint"
+  "$CODEX§, or \${_A_CODEX_BARE#Contents/} before 26.928)§the missing-codex message names both paths"
+  "$DIGEST§disappeared while being read§the mid-scan change refusal"
+  "$DIGEST§stored integrity digest does not match this plist§the formula/modified refusal"
+  'clone-agent.sh§embedded ASAR integrity digest — see \"When preflight fails\"§the digest die points at "When preflight fails"'
+)
 
 print "anchors"
 for a in $anchors; do
@@ -98,11 +109,36 @@ doc_must+=(
   'preflight stops with `Missing bundled codex executable`§the missing-codex message quote'
   "\`codesign --verify --strict -R='anchor apple generic'\`§the preflight seal-check quote"
   'The app **appends** `dirname(CODEX_CLI_PATH)`§the append-not-prepend claim'
+  'the `.cjs` launcher appends the `CodexCLI.app/Contents/MacOS`§the launcher-appends claim'
+  '`Resources/codex` before 26.928, is the deliberate exception§section 5 names the bare layout'
+  '`access(2)` `X_OK`§the shared executable-test definition'
+  'has no valid Apple-issued signature — reinstall the source app§the seal refusal quote'
+  'is present but not an executable regular file§the broken-install hint quote'
+  '`stored integrity digest does not match this plist`§the formula/modified refusal quote'
+  'disappeared while being read§the mid-scan change quote'
+  '`node is required for app targets`** — see section 15§the node refusal points at section 15'
+  '`Missing bundled codex executable`** names both paths§the missing-codex both-paths claim'
 )
 for d in $doc_must; do
   frag="${d%%§*}"; what="${d#*§}"
   grep -qF -- "$frag" "$DOC" && ok "$what" \
     || note "$what is gone from $DOC — the anchor now guards nothing"
+done
+
+# Claims and commands in the other docs that the codex-layout and digest work
+# depends on: the keychain note for both layouts, the by-hand loop's digest step,
+# and the two regression scripts in CONTRIBUTING's required checks.
+print "\nother docs"
+other_docs=(
+  'README.md§(`Contents/Resources/codex` before 26.928)§README keychain note names the bare layout'
+  'adapters/codex.sh§(Contents/Resources/codex before 26.928;§adapter keychain note names the bare layout'
+  'adapters/README.md§the digest embedded in the framework binary§the by-hand loop syncs the embedded digest'
+  'CONTRIBUTING.md§node tools/test-patch-asar-integrity-digest.js§CONTRIBUTING runs the digest tests'
+  'CONTRIBUTING.md§zsh -f tools/test-codex-layout.sh§CONTRIBUTING runs the layout tests'
+)
+for d in $other_docs; do
+  f="${d%%§*}"; rest="${d#*§}"; frag="${rest%%§*}"; what="${rest#*§}"
+  grep -qF -- "$frag" "$f" 2>/dev/null && ok "$what" || note "$what — \"$frag\" is gone from $f"
 done
 
 # Load-bearing structure. Each of these has been deleted or inverted by a real

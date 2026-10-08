@@ -372,11 +372,14 @@ supported, newest first, so a source that has not updated yet (or an older one
 pinned with `--source`) still builds: the adapter keeps the two paths in
 `_A_CODEX_CLI_APP` and `_A_CODEX_BARE`, `_a_codex_signed` picks whichever the
 bundle has, and `codex-cli-launcher.cjs` makes the same choice at run time. Both
-sides apply one test — a layout counts only if its executable is a regular file
-with the execute bit — and `tools/test-codex-layout.sh` asserts they agree on every
-shape (both layouts, a non-executable or directory nested path, dangling and live
+sides apply one test to the nested layout — its executable must be a regular file
+the current user may execute (stat plus `access(2)` `X_OK`, not merely a mode bit)
+— and `tools/test-codex-layout.sh` asserts they agree on every shape (both
+layouts, a non-executable or directory nested or bare path, dangling and live
 symlinks); if they ever differ, preflight verifies one binary while the clone
-spawns another. When
+spawns another. The launcher falls back to the bare path without testing it,
+which is safe only because preflight refused the build unless one layout
+qualified. When
 it moves again, preflight stops with `Missing bundled codex executable` and names
 both paths it looked for, which is what that message is for.
 
@@ -1000,18 +1003,31 @@ installs and doesn't work. Fix the assumption in the relevant adapter and re-run
 
 Not every refusal means the adapter is out of date. Read the message first:
 
-- **`Missing bundled codex executable`** names both paths it looked for. The
-  bundled CLI has moved again — see section 13 for where it lived before and how
-  the adapter and launcher choose between layouts; update both together.
-- **`… has no valid Apple-issued signature — reinstall the source app`** (with
-  codesign's own reason on the next line). The source's bundled codex is ad-hoc
-  signed, unsigned or modified. That is a broken install, not a layout change:
-  reinstall the original app rather than relaxing the check (section 13).
+- **`Missing bundled codex executable`** names both paths it looked for. If a
+  following line says one of them `is present but not an executable regular file`,
+  the install is broken (a directory, a lost execute bit): reinstall the source
+  app. Otherwise the bundled CLI has moved again — see section 13 for where it
+  lived before and how the adapter and launcher choose between layouts; update
+  both together.
+- **`… has no valid Apple-issued signature — reinstall the source app`**, followed
+  by a `codesign:` line with codesign's own first line of output (for example
+  `code object is not signed at all`, `invalid signature (code or signature have
+  been modified)`, or `code failed to satisfy specified code requirement(s)` for
+  ad-hoc). The source's bundled codex is unsigned, modified or ad-hoc signed. That
+  is a broken install, not a layout change: reinstall the original app rather than
+  relaxing the check (section 13).
 - **`Preflight failed: embedded ASAR integrity digest`** comes from
   `tools/patch-asar-integrity-digest.js --check`, which prints the specific reason
-  first. A digest the formula no longer reproduces, an unknown slot version or a
-  slot step 7 cannot reach means upstream changed something — see section 3. A
-  path that "disappeared while being read" means the source was changing under the
-  scan, usually the vendor's updater: wait for it to finish and run again.
+  first:
+  - `stored integrity digest does not match this plist` — upstream changed the
+    digest formula, **or** the source bundle was modified: reinstall it first, and
+    only if it still fails treat it as an upstream change (section 3). The same
+    goes for `unknown layout`, `version … is not supported`, `sentinel found
+    outside an __asar_integrity section`, `has an __asar_integrity section the
+    patch step does not reach` and `executable resolves outside the bundle`.
+  - `… disappeared while being read` — the source changed under the scan, usually
+    the vendor's updater: wait for it to finish and run again.
+  - `cannot <list|read|resolve|…> <path> (<errno>)` — a permission or I/O problem
+    in the source; the build's own copy would hit it too.
 - **`node is required for app targets`** — see section 15 on shims under a
   sandboxed `HOME`.

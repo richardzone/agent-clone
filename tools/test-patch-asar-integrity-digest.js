@@ -302,29 +302,52 @@ try {
     const r = run('--check', app);
     check('junk fat headers are ignored by the bundle scan', r.code === 0 && /✓/.test(r.err), r.err);
   }
-  // 20. --check: a file that vanishes between readdir and the next call (the
-  //     source being updated mid-scan) is refused by name, not with a stack trace.
-  //     A preload makes realpathSync report ENOENT for it, as the race would.
-  {
-    const app = makeApp('vanish', {
-      frameworks: { 'E.framework': { binary: slice({ digest: EXPECTED }) } },
-      extra: { 'Contents/Resources/vanishing.js': Buffer.from('x') },
-    });
-    const preload = path.join(root, 'vanish-preload.js');
-    fs.writeFileSync(preload, `const fs = require('fs'); const real = fs.realpathSync;
-fs.realpathSync = function (p, ...a) {
-  if (String(p).endsWith('vanishing.js')) { const e = new Error('ENOENT'); e.code = 'ENOENT'; throw e; }
-  return real.call(this, p, ...a);
-};`);
-    const r = spawnSync(process.execPath, ['-r', preload, TOOL, '--check', app], { encoding: 'utf8' });
-    check('a file vanishing mid-scan is refused by name',
-      r.status !== 0 && /vanishing\.js disappeared while being read/.test(r.stderr) && !/\n\s+at /.test(r.stderr), r.stderr);
-  }
   // 17. no slot anywhere: succeed and say so
   {
     const app = makeApp('none', { frameworks: { 'E.framework': { binary: Buffer.alloc(64) } } });
     const r = run('--check', app);
     check('no slot anywhere is reported, not an error', r.code === 0 && /none/.test(r.err), r.err);
+  }
+  // 20. Each guarded filesystem call refuses by name, never with a stack trace.
+  //     A preload makes one fs function fail for one path, as a race (ENOENT:
+  //     the source being updated mid-read) or an I/O error would.
+  {
+    const failing = (name, fn, match, code) => {
+      const preload = path.join(root, `fail-${name}.js`);
+      fs.writeFileSync(preload, `const fs = require('fs'); const real = fs.${fn};
+fs.${fn} = function (p, ...a) {
+  if (${JSON.stringify(fn)} === 'writeSync' || String(p).endsWith(${JSON.stringify(match)})) {
+    const e = new Error(${JSON.stringify(code)}); e.code = ${JSON.stringify(code)}; throw e;
+  }
+  return real.call(this, p, ...a);
+};`);
+      return preload;
+    };
+    const noTrace = (s) => !/\n\s+at /.test(s);
+    const cases = [
+      ['walk-realpath', 'realpathSync', 'vanishing.js', 'ENOENT', '--check', /vanishing\.js disappeared while being read/],
+      ['fw-realpath', 'realpathSync', '/Versions/Current/E', 'ENOENT', '--check', /E disappeared while being read/],
+      ['fw-read', 'readFileSync', '/Versions/A/E', 'ENOENT', '--check', /E disappeared while being read/],
+      ['fw-list', 'readdirSync', '/Contents/Frameworks', 'EACCES', '--check', /cannot list Contents\/Frameworks \(EACCES\)/],
+      ['patch-open', 'openSync', '/Versions/A/E', 'ENOENT', null, /E disappeared while being read/],
+      ['patch-write', 'writeSync', '', 'EIO', null, /cannot write .*E \(EIO\)/],
+    ];
+    for (const [name, fn, match, code, mode, want] of cases) {
+      const app = makeApp(`guard-${name}`, {
+        frameworks: { 'E.framework': { binary: slice({ digest: mode ? EXPECTED : Buffer.alloc(32) }) } },
+        extra: { 'Contents/Resources/vanishing.js': Buffer.from('x') },
+      });
+      const args = ['-r', failing(name, fn, match, code), TOOL, ...(mode ? [mode] : []), app];
+      const r = spawnSync(process.execPath, args, { encoding: 'utf8' });
+      check(`guarded ${name} (${code}) is refused by name`,
+        r.status !== 0 && want.test(r.stderr) && noTrace(r.stderr) && !/✓/.test(r.stderr), r.stderr);
+    }
+  }
+  // 21. A bundle path that never existed is reported as missing, not as an update
+  {
+    const r = run('--check', path.join(root, 'no-such.app'));
+    check('a nonexistent bundle is not called "disappeared"',
+      r.code !== 0 && /cannot resolve .*no-such\.app \(ENOENT\)/.test(r.err) && !/disappeared/.test(r.err), r.err);
   }
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
