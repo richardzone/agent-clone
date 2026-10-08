@@ -146,8 +146,9 @@ signatures on nested helpers. The correct order is: adapter-specific deep conten
 (helpers inside the framework, `Libraries`, `PlugIns`) → the frameworks themselves
 → native modules outside the asar → the real main binary → **the outer bundle
 last**, so its seal covers everything already signed. Codex's bundled
-`Resources/codex-cli/` subtree (above all its `CodexCLI.app`) is the deliberate
-exception: keep its original Developer ID signatures (section 13).
+`Resources/codex-cli/` subtree (above all its `CodexCLI.app`), or the bare
+`Resources/codex` before 26.928, is the deliberate exception: keep its original
+Developer ID signatures (section 13).
 
 `--deep` is fine — and recommended — for **verification**
 (`codesign --verify --deep --strict`).
@@ -370,7 +371,12 @@ binary, since the bundle's seal is what a copy can break. Both layouts stay
 supported, newest first, so a source that has not updated yet (or an older one
 pinned with `--source`) still builds: the adapter keeps the two paths in
 `_A_CODEX_CLI_APP` and `_A_CODEX_BARE`, `_a_codex_signed` picks whichever the
-bundle has, and `codex-cli-launcher.cjs` makes the same choice at run time. When
+bundle has, and `codex-cli-launcher.cjs` makes the same choice at run time. Both
+sides apply one test — a layout counts only if its executable is a regular file
+with the execute bit — and `tools/test-codex-layout.sh` asserts they agree on every
+shape (both layouts, a non-executable or directory nested path, dangling and live
+symlinks); if they ever differ, preflight verifies one binary while the clone
+spawns another. When
 it moves again, preflight stops with `Missing bundled codex executable` and names
 both paths it looked for, which is what that message is for.
 
@@ -829,7 +835,7 @@ names into a command against an unrelated live instance.
 ```bash
 NAME=MyCodex
 # Set SOURCE_APP to the actual source bundle selected by this profile/adapter.
-SOURCE_APP=/Applications/Codex.app
+SOURCE_APP=/Applications/ChatGPT.app
 
 # 1. Version matches the original
 /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$SOURCE_APP/Contents/Info.plist"
@@ -991,3 +997,21 @@ aborts and names what is missing.
 
 This is deliberate: better a clear abort than silently producing an app that
 installs and doesn't work. Fix the assumption in the relevant adapter and re-run.
+
+Not every refusal means the adapter is out of date. Read the message first:
+
+- **`Missing bundled codex executable`** names both paths it looked for. The
+  bundled CLI has moved again — see section 13 for where it lived before and how
+  the adapter and launcher choose between layouts; update both together.
+- **`… has no valid Apple-issued signature — reinstall the source app`** (with
+  codesign's own reason on the next line). The source's bundled codex is ad-hoc
+  signed, unsigned or modified. That is a broken install, not a layout change:
+  reinstall the original app rather than relaxing the check (section 13).
+- **`Preflight failed: embedded ASAR integrity digest`** comes from
+  `tools/patch-asar-integrity-digest.js --check`, which prints the specific reason
+  first. A digest the formula no longer reproduces, an unknown slot version or a
+  slot step 7 cannot reach means upstream changed something — see section 3. A
+  path that "disappeared while being read" means the source was changing under the
+  scan, usually the vendor's updater: wait for it to finish and run again.
+- **`node is required for app targets`** — see section 15 on shims under a
+  sandboxed `HOME`.

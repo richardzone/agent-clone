@@ -55,6 +55,8 @@ zsh -f tools/check-doc-claims.sh
 node --check tools/patch-asar-productname.js
 node --check tools/patch-asar-integrity-digest.js
 node tools/test-patch-asar-integrity-digest.js
+zsh -f -n tools/test-codex-layout.sh
+zsh -f tools/test-codex-layout.sh
 node --check tools/write-config-library.js
 node --check tools/codex-cli-launcher.cjs
 ```

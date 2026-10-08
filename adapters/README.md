@@ -263,8 +263,10 @@ auto-update: all four differ. Commit to an interface before hitting those and th
 abstraction will almost certainly be wrong.
 
 The minimum loop to validate by hand: copy the bundle → edit `Info.plist` → change
-the asar's `productName` → sync the integrity hash → rename helpers (if needed) →
-re-sign → **actually launch it and confirm the processes are healthy**. A run that
+the asar's `productName` → sync the integrity hash (and, on newer Electron with a
+used `__asar_integrity` slot, the digest embedded in the framework binary — see
+AGENTS.md section 3, or the launch fails with "Failed to get integrity for
+validatable asar archive") → rename helpers (if needed) → re-sign → **actually launch it and confirm the processes are healthy**. A run that
 completes without errors proves nothing; the verification checklist in
 [../AGENTS.md](../AGENTS.md) has ready-to-use commands.
 

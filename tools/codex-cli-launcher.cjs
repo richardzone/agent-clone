@@ -11,10 +11,21 @@ const { spawn } = require('node:child_process');
 const env = { ...process.env };
 delete env.CODEX_CLI_PATH;
 
-// Keep in step with _A_CODEX_CLI_APP / _A_CODEX_BARE in adapters/codex.sh: the
-// nested bundle since 26.928, else the bare binary earlier builds shipped.
+// Keep in step with _a_codex_signed in adapters/codex.sh: the nested bundle since
+// 26.928, else the bare binary earlier builds shipped. A layout counts only if
+// its executable is a regular file with the execute bit — the same test preflight
+// used to choose the binary it verified, so the clone never spawns another one.
+const isExecutableFile = (p) => {
+  try {
+    if (!fs.statSync(p).isFile()) return false;
+    fs.accessSync(p, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+};
 const bundledCodex = path.join(__dirname, 'codex-cli', 'CodexCLI.app', 'Contents', 'MacOS', 'codex');
-const codexPath = fs.existsSync(bundledCodex) ? bundledCodex : path.join(__dirname, 'codex');
+const codexPath = isExecutableFile(bundledCodex) ? bundledCodex : path.join(__dirname, 'codex');
 
 // The app appends dirname(CODEX_CLI_PATH) to the app-server's PATH, if absent, as
 // a fallback `codex` for agent shells; a user's own codex earlier on PATH still

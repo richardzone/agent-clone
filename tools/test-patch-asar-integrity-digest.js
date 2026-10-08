@@ -302,6 +302,24 @@ try {
     const r = run('--check', app);
     check('junk fat headers are ignored by the bundle scan', r.code === 0 && /✓/.test(r.err), r.err);
   }
+  // 20. --check: a file that vanishes between readdir and the next call (the
+  //     source being updated mid-scan) is refused by name, not with a stack trace.
+  //     A preload makes realpathSync report ENOENT for it, as the race would.
+  {
+    const app = makeApp('vanish', {
+      frameworks: { 'E.framework': { binary: slice({ digest: EXPECTED }) } },
+      extra: { 'Contents/Resources/vanishing.js': Buffer.from('x') },
+    });
+    const preload = path.join(root, 'vanish-preload.js');
+    fs.writeFileSync(preload, `const fs = require('fs'); const real = fs.realpathSync;
+fs.realpathSync = function (p, ...a) {
+  if (String(p).endsWith('vanishing.js')) { const e = new Error('ENOENT'); e.code = 'ENOENT'; throw e; }
+  return real.call(this, p, ...a);
+};`);
+    const r = spawnSync(process.execPath, ['-r', preload, TOOL, '--check', app], { encoding: 'utf8' });
+    check('a file vanishing mid-scan is refused by name',
+      r.status !== 0 && /vanishing\.js disappeared while being read/.test(r.stderr) && !/\n\s+at /.test(r.stderr), r.stderr);
+  }
   // 17. no slot anywhere: succeed and say so
   {
     const app = makeApp('none', { frameworks: { 'E.framework': { binary: Buffer.alloc(64) } } });

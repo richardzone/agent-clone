@@ -18,7 +18,7 @@ A_CLI_COMMAND="codex"
 # come from a compile-time product-name constant inside Codex Framework, and the
 # third is hard-coded in the Rust binary at
 # Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex
-# (rmcp-client/src/oauth.rs). Clones therefore cannot get their own keychain
+# (Contents/Resources/codex before 26.928; rmcp-client/src/oauth.rs). Clones therefore cannot get their own keychain
 # entries and share them with the original. See README.md.
 A_KEYCHAIN_ISOLATED=0
 
@@ -43,9 +43,14 @@ _A_CODEX_BARE='Contents/Resources/codex'
 
 # The signed code to verify for a bundle's codex — the nested bundle on the new
 # layout, the bare binary on the old one — or nothing if neither is present.
+# A layout counts only if its executable is a regular file with the execute bit
+# (-f and -x, both following symlinks). tools/codex-cli-launcher.cjs applies the
+# same test at run time; if the two ever differ, preflight can verify one binary
+# while the clone spawns the other.
 _a_codex_signed() {
   local app="$1"
-  if [[ -x "$app/$_A_CODEX_CLI_APP/Contents/MacOS/codex" ]]; then
+  local nested="$app/$_A_CODEX_CLI_APP/Contents/MacOS/codex"
+  if [[ -f "$nested" && -x "$nested" ]]; then
     print "$app/$_A_CODEX_CLI_APP"
   elif [[ -f "$app/$_A_CODEX_BARE" && -x "$app/$_A_CODEX_BARE" ]]; then
     print "$app/$_A_CODEX_BARE"
@@ -107,8 +112,10 @@ a_preflight() {
   # signature, and the copy is byte-identical to this source — so a source that
   # fails here would fail there too, only after step 2 has already deleted the
   # working clone. Refuse now, before any write.
-  codesign --verify --strict -R='anchor apple generic' "$codex_app" 2>/dev/null ||
-    { print "${codex_app#$src/Contents/} in the source has no valid Apple-issued signature — reinstall the source app"; return 1 }
+  local why
+  why="$(codesign --verify --strict -R='anchor apple generic' "$codex_app" 2>&1)" ||
+    { print "${codex_app#$src/Contents/} in the source has no valid Apple-issued signature — reinstall the source app"
+      print "   codesign: ${why##*$'\n'}"; return 1 }
   # Identity: only Browser Use depends on these, and the identifiers and Team ID
   # below are pinned to what OpenAI ships today. If they rotate either, the clone
   # itself is still fine and the chain may well still be accepted under the new
@@ -236,10 +243,10 @@ a_sign_extra() {
   # left of ||), so set -e is live inside it: a bare failing command here would
   # abort the whole run with no message at all — and by this point step 2 has
   # already deleted the previously working clone.
-  local codex_signed="$(_a_codex_signed "$app")"
+  local codex_signed="$(_a_codex_signed "$app")" why
   [[ -n "$codex_signed" ]] || die "The copied bundle has no codex executable — Browser Use would not start"
-  codesign --verify --strict -R='anchor apple generic' "$codex_signed" >/dev/null 2>&1 ||
-    die "${codex_signed#$app/Contents/} lost its Developer ID signature during the copy — Browser Use would not authorize"
+  why="$(codesign --verify --strict -R='anchor apple generic' "$codex_signed" 2>&1)" ||
+    die "${codex_signed#$app/Contents/} lost its Developer ID signature during the copy — Browser Use would not authorize (codesign: ${why##*$'\n'})"
   for f in "$app/Contents/Resources/native/"*; do
     [[ -f "$f" ]] && codesign --force --sign - "$f" >/dev/null 2>&1
   done

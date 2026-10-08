@@ -179,18 +179,35 @@ function slotsIn(bin, label) {
   return { buf, slots };
 }
 
+// Every filesystem call that can fail goes through this, so a failure is refused
+// with the path named instead of a stack trace. ENOENT on something just listed
+// means the bundle changed mid-read — typically the vendor's updater rewriting
+// the source — which a rebuild must not copy half-way through either.
+function guarded(p, what, fn) {
+  try {
+    return fn();
+  } catch (e) {
+    const rel = path.relative(appPath, p) || p;
+    if (e.code === 'ENOENT') {
+      return fail(`${rel} disappeared while being read — the app is changing (an update in progress?); retry once it has finished`);
+    }
+    return fail(`cannot ${what} ${rel} (${e.code || e.message})`);
+  }
+}
+
 // --- the binaries the patch step reaches: each framework's own executable ---
-const appReal = fs.realpathSync(appPath);
+const appReal = guarded(appPath, 'resolve', () => fs.realpathSync(appPath));
 const frameworksDir = path.join(appPath, 'Contents', 'Frameworks');
 const targets = [];
 if (fs.existsSync(frameworksDir)) {
-  for (const fw of fs.readdirSync(frameworksDir).filter((f) => f.endsWith('.framework'))) {
+  const names = guarded(frameworksDir, 'list', () => fs.readdirSync(frameworksDir));
+  for (const fw of names.filter((f) => f.endsWith('.framework'))) {
     const current = path.join(frameworksDir, fw, 'Versions', 'Current');
     const exe = (plistValue(path.join(current, 'Resources', 'Info.plist'), 'CFBundleExecutable', 'raw') || '').trim()
       || fw.slice(0, -'.framework'.length);
     const bin = path.join(current, exe);
     if (!fs.existsSync(bin)) continue;
-    const real = fs.realpathSync(bin);
+    const real = guarded(bin, 'resolve', () => fs.realpathSync(bin));
     // cp -R keeps symlinks: never write through one that leaves the bundle.
     if (!real.startsWith(appReal + path.sep)) fail(`${fw}: executable resolves outside the bundle (${real})`);
     targets.push({ fw, bin: real });
@@ -223,7 +240,7 @@ for (const { fw, bin } of targets) {
     summary.push(`   Embedded ASAR integrity digest ✓ (${fw}, ${used.length} slice(s)${unusedNote})`);
     continue;
   }
-  const fd = fs.openSync(bin, 'r+');
+  const fd = guarded(bin, 'open for writing', () => fs.openSync(bin, 'r+'));
   try {
     for (const { offset } of used) fs.writeSync(fd, digest, 0, 32, offset + DIGEST);
   } finally {
@@ -281,22 +298,15 @@ function hasIntegritySection(file) {
 }
 if (checkOnly) {
   const reached = new Set(targets.map((t) => t.bin));
-  // An unreadable file or directory is refused by name: the build's `cp -R` could
-  // not copy it either, so this only moves that failure earlier.
-  const guarded = (p, what, fn) => {
-    try {
-      return fn();
-    } catch (e) {
-      return fail(`cannot ${what} ${path.relative(appPath, p) || p} (${e.code || e.message})`);
-    }
-  };
+  // An unreadable file or directory is refused by name (see guarded): the build's
+  // `cp -R` could not copy it either, so this only moves that failure earlier.
   const walk = (dir) => {
     for (const ent of guarded(dir, 'list', () => fs.readdirSync(dir, { withFileTypes: true }))) {
       const p = path.join(dir, ent.name);
       if (ent.isDirectory()) { walk(p); continue; }
       // Symlinks are skipped (their targets are walked directly); compare real paths
       // because the targets were resolved through Versions/Current.
-      if (!ent.isFile() || reached.has(fs.realpathSync(p))) continue;
+      if (!ent.isFile() || reached.has(guarded(p, 'resolve', () => fs.realpathSync(p)))) continue;
       if (guarded(p, 'read', () => hasIntegritySection(p))) {
         fail(`${path.relative(appPath, p)} has an __asar_integrity section the patch step does not reach`);
       }
